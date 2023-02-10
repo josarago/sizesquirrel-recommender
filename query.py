@@ -20,5 +20,4 @@ left join brand
     on item.brand_id = brand.id
 left join gender
     on item.gender_id = gender.id
-
 """
