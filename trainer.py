@@ -1,6 +1,9 @@
+import os
+import logging
 import datetime
 import sqlite3 as db
 import pandas as pd
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 
@@ -10,18 +13,34 @@ from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 
 from pipelines import embedding_pipe
-
-from config import (
-	DB_FILE_PATH,
-	US_EURO_SIZE_THRESHOLD,
-	get_logger,
-	ModelConfig
-)
-
 from query import QUERY
 
+DATA_DIR_PATH = "data"
+DB_FILENAME = "production-database.20230207.sanitized.db"
+DB_FILE_PATH = os.path.join(DATA_DIR_PATH, DB_FILENAME)
+US_EURO_SIZE_THRESHOLD = 32
 
-logger = get_logger(name=__name__)
+
+
+logging.basicConfig(format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
+    datefmt='%Y-%m-%d:%H:%M:%S',
+    level=logging.DEBUG)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ModelConfig:
+	test_size: float = 0.3
+	embedding_dim: int = 5
+	learning_rate: float = 0.0005
+	batch_size: int = 512
+	checkpoint_path: str = "/tmp/model_checkpoint"
+	validation_split: float = 0.3
+	epochs: int = 2_000
+	fit_verbose: int = 1
+
+# logger = get_logger(name=__name__)
 
 class Trainer:
 	_query = QUERY
@@ -162,14 +181,13 @@ class Trainer:
 		dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
 		add = tf.keras.layers.Add()([dot, user_bias, sku_bias])
 		flatten = layers.Flatten()(add)
-		scale = tf.keras.layers.Lambda(lambda x: 4*tf.nn.sigmoid(x) + 1)(flatten)
+		scale = tf.keras.layers.Lambda(lambda x: 4 * tf.nn.sigmoid(x) + 1)(flatten)
 
 		# model input/output definition
 		self.model = Model(inputs=[user_input, sku_input], outputs=scale)
-
 		self.model.compile(
-			loss="mse",
-			metrics=["mae"],
+			loss="mae",
+			metrics=["mse", "mae"],
 			optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate)
 		)
 	
@@ -188,7 +206,7 @@ class Trainer:
 
 		self._early_stopping = tf.keras.callbacks.EarlyStopping(
 			monitor="val_loss",
-			min_delta=5e-4,
+			min_delta=1e-5,
 			patience=50,
 			verbose=2,
 			restore_best_weights=True
@@ -239,14 +257,23 @@ class Trainer:
 	def plot_results(self, results, plot_key="loss"):
 		fig, ax = plt.subplots(1, figsize=(7, 7))
 		ax.plot(results.history[plot_key], label=plot_key)
-		ax.plot(results.history[f"val_{plot_key}"], "-o", label=f"val_{plot_key}")
+		ax.plot(results.history[f"val_{plot_key}"], "-", label=f"val_{plot_key}")
 		ax.set_xlabel('Epoch')
 		plt.legend()
 		plt.grid(True)
 		return ax
 
 if __name__ == "__main__":
-	model_config = ModelConfig()
+	model_config = ModelConfig(
+		test_size=0.3,
+		embedding_dim=2,
+		learning_rate=0.0005,
+		batch_size=1024,
+		checkpoint_path=os.path.join(os.getcwd(), "model_checkpoints"),
+		validation_split=0.4,
+		epochs=2_000,
+		fit_verbose=0
+	)
 	trainer = Trainer(model_config)
 	trainer.load_data()
 	trainer.transform_data()
@@ -264,5 +291,4 @@ if __name__ == "__main__":
 	
 	# model evaluation
 	trainer.evaluate_model(df_test, y_test)
-	trainer.plot_results(results)
 	
