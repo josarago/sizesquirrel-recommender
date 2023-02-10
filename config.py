@@ -26,6 +26,6 @@ class ModelConfig:
 	batch_size: int = 512
 	checkpoint_path: str = "/tmp/model_checkpoint"
 	validation_split: float = 0.3
-	epochs: int = 20
+	epochs: int = 2_000
 	fit_verbose: int = 1
 
