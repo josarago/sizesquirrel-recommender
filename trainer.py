@@ -33,13 +33,30 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     test_size: float = 0.3
-    embedding_dim: int = 2
+    embedding_dim: int = 4
     learning_rate: float = 0.0005
     batch_size: int = 1024
     checkpoint_path: str = (os.path.join(os.getcwd(), "model_checkpoints"),)
     validation_split: float = 0.4
     epochs: int = 2_000
-    fit_verbose: int = 0
+    fit_verbose: int = 1
+    asym_loss_gamma: float = 0.5
+
+
+class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
+    def __init__(self, gamma=0.5):
+        super().__init__()
+        self._gamma = gamma
+
+    def call(self, y_true, y_pred):
+        """
+        if alpha = 0.5 this is equivalent to the MSE Loss
+        """
+        asym_factor = tf.abs(
+            tf.constant(self._gamma)
+            - tf.cast(tf.math.greater(y_pred, y_true), tf.float32)
+        )
+        return tf.reduce_mean(asym_factor * tf.math.square(y_pred - y_true), axis=-1)
 
 
 class Trainer:
@@ -268,6 +285,7 @@ class Trainer:
 
 if __name__ == "__main__":
     model_config = ModelConfig()
+    model_config = ModelConfig(fit_verbose=0)
     trainer = Trainer(model_config)
     trainer.load_data()
     trainer.transform_data()
