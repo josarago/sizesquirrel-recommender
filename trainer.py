@@ -12,13 +12,14 @@ import tensorflow as tf
 from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 
+
 from pipelines import embedding_pipe
 from query import QUERY
 
 DATA_DIR_PATH = "data"
 DB_FILENAME = "production-database.20230207.sanitized.db"
 DB_FILE_PATH = os.path.join(DATA_DIR_PATH, DB_FILENAME)
-US_EURO_SIZE_THRESHOLD = 32
+US_EURO_SIZE_THRESHOLD = 25
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -32,13 +33,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     test_size: float = 0.3
-    embedding_dim: int = 5
+    embedding_dim: int = 2
     learning_rate: float = 0.0005
-    batch_size: int = 512
-    checkpoint_path: str = "/tmp/model_checkpoint"
-    validation_split: float = 0.3
+    batch_size: int = 1024
+    checkpoint_path: str = (os.path.join(os.getcwd(), "model_checkpoints"),)
+    validation_split: float = 0.4
     epochs: int = 2_000
-    fit_verbose: int = 1
+    fit_verbose: int = 0
 
 
 class Trainer:
@@ -72,7 +73,7 @@ class Trainer:
 
     @staticmethod
     def get_sizing_system(size):
-        return "US" if size < 25.0 else "EURO"
+        return "US" if size < US_EURO_SIZE_THRESHOLD else "EURO"
 
     @staticmethod
     def convert_shoe_size_to_inches(size):
@@ -139,6 +140,9 @@ class Trainer:
         )
 
     def initialize_model(self, embedding_df_train):
+        tf.keras.backend.clear_session()
+        tf.random.set_seed(123)
+
         # user pipeline
         user_input = layers.Input(shape=(1,), name="user")
 
@@ -263,16 +267,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    model_config = ModelConfig(
-        test_size=0.3,
-        embedding_dim=2,
-        learning_rate=0.0005,
-        batch_size=1024,
-        checkpoint_path=os.path.join(os.getcwd(), "model_checkpoints"),
-        validation_split=0.4,
-        epochs=2_000,
-        fit_verbose=0,
-    )
+    model_config = ModelConfig()
     trainer = Trainer(model_config)
     trainer.load_data()
     trainer.transform_data()
