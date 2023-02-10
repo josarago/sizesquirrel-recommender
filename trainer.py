@@ -188,8 +188,8 @@ class Trainer:
 
 		self._early_stopping = tf.keras.callbacks.EarlyStopping(
 			monitor="val_loss",
-			min_delta=1e2,
-			patience=30,
+			min_delta=1e-3,
+			patience=50,
 			verbose=2,
 			restore_best_weights=True
 		)
@@ -199,7 +199,7 @@ class Trainer:
 			factor=0.5,
 			patience=20,
 			verbose=2,
-			min_lr=self.model_config.learning_rate/4
+			min_lr=self.model_config.learning_rate/100
 		)
 
 		log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -236,6 +236,15 @@ class Trainer:
 		logger.info("evaluating model")
 		self.model.evaluate(Xs_test, y_test)
 
+	def plot_results(self, results, plot_key="loss"):
+		fig, ax = plt.subplots(1, figsize=(7, 7))
+		ax.plot(results.history[plot_key], label=plot_key)
+		ax.plot(results.history[f"val_{plot_key}"], "-o", label=f"val_{plot_key}")
+		ax.set_xlabel('Epoch')
+		plt.legend()
+		plt.grid(True)
+		return ax
+
 if __name__ == "__main__":
 	model_config = ModelConfig()
 	trainer = Trainer(model_config)
@@ -251,9 +260,9 @@ if __name__ == "__main__":
 	
 	# model evaluation
 	trainer.initialize_model(embedding_df_train)
-	trainer.fit(Xs_train, y_train)
+	results = trainer.fit(Xs_train, y_train)
 	
 	# model evaluation
 	trainer.evaluate_model(df_test, y_test)
-
+	trainer.plot_results(results)
 	
