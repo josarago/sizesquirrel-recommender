@@ -206,7 +206,7 @@ class Trainer:
         # model input/output definition
         self.model = Model(inputs=[user_input, sku_input], outputs=scale)
         self.model.compile(
-            loss="mae",
+            loss=AsymmetricsMeanSquaredError(gamma=self.model_config.asym_loss_gamma),
             metrics=["mse", "mae"],
             optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
         )
@@ -284,7 +284,6 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    model_config = ModelConfig()
     model_config = ModelConfig(fit_verbose=0)
     trainer = Trainer(model_config)
     trainer.load_data()
