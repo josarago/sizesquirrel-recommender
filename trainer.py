@@ -93,7 +93,7 @@ class Trainer:
 			df_features,
 			y,
 			test_size=test_size if test_size else self.model_config.test_size,
-			shuffle=False
+			shuffle=True
 		)
 		return df_train, df_test, y_train, y_test
 		
@@ -188,7 +188,7 @@ class Trainer:
 
 		self._early_stopping = tf.keras.callbacks.EarlyStopping(
 			monitor="val_loss",
-			min_delta=1e-3,
+			min_delta=5e-4,
 			patience=50,
 			verbose=2,
 			restore_best_weights=True
@@ -196,7 +196,7 @@ class Trainer:
 
 		self._reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
 			monitor='val_loss',
-			factor=0.5,
+			factor=0.7,
 			patience=20,
 			verbose=2,
 			min_lr=self.model_config.learning_rate/100
