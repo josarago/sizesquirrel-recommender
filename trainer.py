@@ -198,10 +198,11 @@ class Trainer:
         )(sku_as_integer)
 
         # dot product
-        dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
-        add = tf.keras.layers.Add()([dot, user_bias, sku_bias])
-        flatten = layers.Flatten()(add)
-        scale = tf.keras.layers.Lambda(lambda x: 4 * tf.nn.sigmoid(x) + 1)(flatten)
+        subtracted = layers.Subtract()([user_embedding, sku_embedding])
+        added = layers.Add()([subtracted, user_bias, sku_bias])
+        flatten = layers.Flatten()(added)
+        out = layers.Dense(1, activation="relu")(flatten)
+        scale = layers.Lambda(lambda x: 4 * tf.nn.sigmoid(x) + 1)(out)
 
         # model input/output definition
         self.model = Model(inputs=[user_input, sku_input], outputs=scale)
