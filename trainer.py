@@ -116,18 +116,6 @@ class Trainer:
         self.df["sizing_system"] = self.df["size"].apply(self.get_sizing_system)
         self.df["size_in"] = self.df["size"].apply(self.convert_shoe_size_to_inches)
 
-    # def get_training_set(self):
-    #     # Since we don't have date it is important to keep the dataframe sorted
-    #     # ids are incremented in chronological order
-    #     logger.info(
-    #         f"sorting data by increasing (user-item) `id` number. (chronological order)"
-    #     )
-    #     self.df.sort_values("id", inplace=True)
-    #     df_features = self.df[["user_id", "sku_id"]]
-    #     df_targets = self.df[self._target_columns]
-
-    #     return df_features, df_targets
-
     def get_split_training_set(self, test_size=None, chronological_split=False):
         if chronological_split:
             self.df.sort_values("id", inplace=True)
@@ -179,7 +167,7 @@ class Trainer:
             self.user_sku_mat_df.shape[0] * self.user_sku_mat_df.shape[1]
         )
 
-    def initialize_model(self, inputs_train, vocabularies):
+    def create_model(self, inputs_train, vocabularies):
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
 
@@ -289,7 +277,7 @@ class Trainer:
         )
         return results
 
-    def evaluate_model(self, df_test, model=None):
+    def evaluate_model(self, df_test):
         inputs_test, _ = self.get_embedding_inputs(df_test)
         targets_test = self.get_targets(df_test)
         logger.info("evaluating model")
@@ -319,7 +307,7 @@ if __name__ == "__main__":
     inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
     targets_train = trainer.get_targets(df_train)
     # initialize and train model
-    trainer.initialize_model(inputs_train, vocabularies)
+    trainer.create_model(inputs_train, vocabularies)
     results = trainer.fit(inputs_train, targets_train)
 
     # model evaluation
