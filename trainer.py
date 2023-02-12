@@ -228,13 +228,16 @@ class Trainer:
             optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
         )
 
+    def load_model(self, inputs_train, vocabularies):
+        self.create_model(inputs_train, vocabularies)
+
     def fit(self, Xs_train, y_train, tensorboard_on=False):
-        self._model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-            filepath=self.model_config.checkpoint_path,
-            monitor="val_mae",
-            mode="min",
-            save_best_only=True,
-        )
+        # self._model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        #     filepath=self.model_config.checkpoint_path,
+        #     monitor="val_loss",
+        #     # mode="min",
+        #     save_best_only=True,
+        # )
 
         self._early_stopping = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
@@ -252,18 +255,16 @@ class Trainer:
             min_lr=self.model_config.learning_rate / 100,
         )
 
-        log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self._tensorboard_callback = tf.keras.callbacks.TensorBoard(
-            log_dir=log_dir, histogram_freq=1
-        )
-        logger.info("model callbacks created")
-
         callbacks = [
             self._early_stopping,
             self._reduce_lr,
-            # self._model_checkpoint_callback
         ]
         if tensorboard_on:
+            log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            self._tensorboard_callback = tf.keras.callbacks.TensorBoard(
+                log_dir=log_dir, histogram_freq=1
+            )
+            logger.info("model callbacks created")
             callbacks.append(self._tensorboard_callback)
 
         results = self.model.fit(
@@ -284,7 +285,7 @@ class Trainer:
         self.model.evaluate(inputs_test, targets_test)
 
     def plot_results(self, results, plot_key="loss"):
-        fig, ax = plt.subplots(1, figsize=(7, 7))
+        _, ax = plt.subplots(1, figsize=(7, 7))
         ax.plot(results.history[plot_key], label=plot_key)
         ax.plot(results.history[f"val_{plot_key}"], "-", label=f"val_{plot_key}")
         ax.set_xlabel("Epoch")
