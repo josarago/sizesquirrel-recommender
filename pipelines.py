@@ -12,6 +12,5 @@ embedding_pipe = Pipeline(
                 unknown_value=-1,
                 encoded_missing_value=-2,
             ),
-        )
     ]
 ).set_output(transform="pandas")

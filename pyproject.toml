@@ -18,6 +18,7 @@ ipykernel = "^6.21.1"
 black = "^23.1.0"
 llvmlite = "^0.39.1"
 scikit-lego = "^0.6.14"
+optuna = "^3.1.0"
 
 [tool.poetry.dev-dependencies]
 jupyter = "1.0.0"
