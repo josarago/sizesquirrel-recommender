@@ -2,11 +2,14 @@ import os
 import logging
 import datetime
 import sqlite3 as db
+import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 
+from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 
 import tensorflow as tf
@@ -37,7 +40,7 @@ class ModelConfig:
     embedding_dim: int = 4
     learning_rate: float = 0.0005
     batch_size: int = 1024
-    checkpoint_path: str = (os.path.join(os.getcwd(), "model_checkpoints"),)
+    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
     validation_split: float = 0.4
     epochs: int = 2_000
     fit_verbose: int = 1
@@ -111,10 +114,32 @@ class Trainer:
             size_in_inches = (size * 0.333) + 7.333
         return size_in_inches
 
+    @staticmethod
+    def compute_sku_id(df, validate_brand=False):
+        # check whether this definition makes sense
+        if validate_brand:
+            max_brand_id_per_brand_name = (
+                df.groupby(["brand_name"])
+                .agg(brand_id_count=("brand_id", "nunique"))["brand_id_count"]
+                .max()
+            )
+            assert max_brand_id_per_brand_name == 1
+
+        return (
+            df["brand_name"].astype(str)
+            + "__"
+            + df["model"]
+            + "__"
+            + df["shoe_gender"]
+            + "__"
+            + df["size"].astype(str)
+        )
+
     def transform_data(self):
         logger.info(f"transforming data: computing `sizing system` and `size_in`")
         self.df["sizing_system"] = self.df["size"].apply(self.get_sizing_system)
         self.df["size_in"] = self.df["size"].apply(self.convert_shoe_size_to_inches)
+        self.df["sku_id"] = self.compute_sku_id(self.df)
 
     def get_split_training_set(self, test_size=None, chronological_split=False):
         if chronological_split:
@@ -284,6 +309,15 @@ class Trainer:
         logger.info("evaluating model")
         self.model.evaluate(inputs_test, targets_test)
 
+    def append_predictions(self, df_test):
+        inputs_test, _ = trainer.get_embedding_inputs(df_test)
+        pred_test = trainer.model.predict(inputs_test)
+        y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
+        df_test["predicted_rating"] = y_pred
+        rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
+        df_test[rating_proba_columns] = pred_test
+        return df_test
+
     def plot_results(self, results, plot_key="loss"):
         _, ax = plt.subplots(1, figsize=(7, 7))
         ax.plot(results.history[plot_key], label=plot_key)
@@ -293,6 +327,20 @@ class Trainer:
         plt.grid(True)
         plt.show()
         return ax
+
+    def plot_confusion_matrix(df_test):
+        cm = confusion_matrix(
+            df_test["predicted_rating"].astype(int), df_test["rating"].astype(int)
+        )
+
+        ax = sns.heatmap(cm, annot=True, fmt="d")
+        ax.set_xlabel("Actual Rating")
+        ax.set_xticklabels(range(1, 6))
+        ax.set_ylabel("Predicted Rating")
+        ax.set_yticklabels(range(1, 6))
+        ax.invert_yaxis()
+        plt.show()
+        return ax, cm
 
 
 if __name__ == "__main__":
