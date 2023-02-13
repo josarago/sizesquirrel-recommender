@@ -2,12 +2,17 @@ QUERY = """
 select user_item.id
     , user_item.user_id
     , user_item.item_id
-    , brand.id || '__' || item.model || '__' || gender.id || '__' ||  user_item.size as sku_id
+    , user.street_shoe_size_in
+    , user.foot_shape
+    , user.gender as user_gender
+    , user.climbing_boulder
+    , user.climbing_sport
+    , user.climbing_trad
     , item.asin    
     , brand.name as brand_name
     , item.model
-    , gender.name as gender
-    , cast(user_item.size as float) as size
+    , gender.name as shoe_gender
+    , user_item.size as size
 --    , cast(user_item.size_in as float) as size_in
     , cast(user_item.rating as float) as rating
     , cast(user_item.fit as float) as fit
@@ -20,4 +25,6 @@ left join brand
     on item.brand_id = brand.id
 left join gender
     on item.gender_id = gender.id
+left join user
+    on user_item.user_id = user.id
 """
