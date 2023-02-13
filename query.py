@@ -3,7 +3,7 @@ select user_item.id
     , user_item.user_id
     , user_item.item_id
     , user.street_shoe_size_in
-    , user.foot_shape
+    , user.foot_shape as user_foot_shape
     , user.gender as user_gender
     , user.climbing_boulder
     , user.climbing_sport
