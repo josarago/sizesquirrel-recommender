@@ -13,6 +13,7 @@ from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 
 import tensorflow as tf
+
 from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
@@ -28,9 +29,8 @@ US_EURO_SIZE_THRESHOLD = 25
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
     datefmt="%Y-%m-%d:%H:%M:%S",
-    level=logging.DEBUG,
+    level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +45,8 @@ class ModelConfig:
     epochs: int = 2_000
     fit_verbose: int = 1
     asym_loss_gamma: float = 0.5
+    classification_loss: str = "categorical_crossentropy"
+    embedding_func: str = "subtract"
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -192,10 +194,18 @@ class Trainer:
             self.user_sku_mat_df.shape[0] * self.user_sku_mat_df.shape[1]
         )
 
-    def create_model(self, inputs_train, vocabularies):
-        tf.keras.backend.clear_session()
-        tf.random.set_seed(123)
+    def create_dummy_classifier(self, targets_train):
+        mean_proba = targets_train.mean().values.T.reshape(1, -1)
 
+        def constant_output(x):
+            batch_size = tf.shape(x)[0]
+            return tf.tile(tf.constant(mean_proba, dtype=tf.float32), [batch_size, 1])
+
+        user_input = layers.Input(shape=(1,), name="user_id")
+        out = layers.Lambda(constant_output)(user_input)
+        self.model = Model(inputs=[user_input], outputs=out)
+
+    def create_classifier(self, inputs_train, vocabularies):
         # user pipeline
         user_input = layers.Input(shape=(1,), name="user_id")
 
@@ -233,28 +243,39 @@ class Trainer:
             # embeddings_regularizer="l2"
         )(sku_as_integer)
 
-        # dot product
-        subtracted = layers.Subtract()([user_embedding, sku_embedding])
-        added = layers.Add()([subtracted, user_bias, sku_bias])
+        if self.model_config.embedding_func == "subtract":
+            # dot product
+            logger.info("Model will subtract embeddings")
+            subtracted = layers.Subtract()([user_embedding, sku_embedding])
+            added = layers.Add()([subtracted, user_bias, sku_bias])
+
+        elif self.model_config.embedding_func == "add":
+            # - original model ~LightFM
+            logger.info("Model will add embeddings")
+            dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
+            added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
+        else:
+            raise ValueError("model_type can be either `subtract` or `add`")
         flatten = layers.Flatten()(added)
         # hidden0 = layers.Dense(11, activation="relu")(flatten)
-        hidden0 = layers.Dense(7, activation="relu")(flatten)
-        out = layers.Dense(5, activation="softmax")(hidden0)
-
+        # hidden0 = layers.Dense(7, activation="relu")(flatten)
+        out = layers.Dense(5, activation="softmax")(flatten)
         # model input/output definition
         self.model = Model(inputs=[user_input, sku_input], outputs=out)
+
+    def compile_model(self):
         self.model.compile(
-            loss="kullback_leibler_divergence",  # "categorical_crossentropy",
+            loss=self.model_config.classification_loss,
             metrics=[
-                tf.keras.metrics.CategoricalCrossentropy(),
-                tf.keras.metrics.KLDivergence(),
-                tf.keras.metrics.Precision(),
+                "categorical_crossentropy",
+                "kullback_leibler_divergence",
+                "categorical_accuracy",
             ],
             optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
         )
 
     def load_model(self, inputs_train, vocabularies):
-        self.create_model(inputs_train, vocabularies)
+        self.create_classifier(inputs_train, vocabularies)
 
     def fit(self, Xs_train, y_train, tensorboard_on=False):
         # self._model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -263,6 +284,8 @@ class Trainer:
         #     # mode="min",
         #     save_best_only=True,
         # )
+        tf.keras.backend.clear_session()
+        tf.random.set_seed(123)
 
         self._early_stopping = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
@@ -274,7 +297,7 @@ class Trainer:
 
         self._reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss",
-            factor=0.7,
+            factor=0.5,
             patience=20,
             verbose=2,
             min_lr=self.model_config.learning_rate / 100,
@@ -310,8 +333,8 @@ class Trainer:
         self.model.evaluate(inputs_test, targets_test)
 
     def append_predictions(self, df_test):
-        inputs_test, _ = trainer.get_embedding_inputs(df_test)
-        pred_test = trainer.model.predict(inputs_test)
+        inputs_test, _ = self.get_embedding_inputs(df_test)
+        pred_test = self.model.predict(inputs_test)
         y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
         df_test["predicted_rating"] = y_pred
         rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
@@ -328,36 +351,52 @@ class Trainer:
         plt.show()
         return ax
 
-    def plot_confusion_matrix(df_test):
-        cm = confusion_matrix(
-            df_test["predicted_rating"].astype(int), df_test["rating"].astype(int)
+    @staticmethod
+    def plot_confusion_matrix(*args: pd.DataFrame, fig_height=10):
+        fig, axs = plt.subplots(
+            1, len(args), figsize=(fig_height, fig_height * len(args))
         )
+        axs = axs.ravel()
+        for ax, df in zip(axs, args):
 
-        ax = sns.heatmap(cm, annot=True, fmt="d")
-        ax.set_xlabel("Actual Rating")
-        ax.set_xticklabels(range(1, 6))
-        ax.set_ylabel("Predicted Rating")
-        ax.set_yticklabels(range(1, 6))
-        ax.invert_yaxis()
-        plt.show()
-        return ax, cm
+            cm = confusion_matrix(
+                df["predicted_rating"].astype(int), df["rating"].astype(int)
+            )
+
+            ax = sns.heatmap(cm, annot=True, fmt="d")
+            ax.set_xlabel("Actual Rating")
+            ax.set_xticklabels(range(1, 6))
+            ax.set_ylabel("Predicted Rating")
+            ax.set_yticklabels(range(1, 6))
+            ax.invert_yaxis()
+            plt.show()
+        return fig, axs
 
 
 if __name__ == "__main__":
-    model_config = ModelConfig(fit_verbose=1)
+    model_config = ModelConfig(
+        fit_verbose=0,
+        classification_loss="categorical_crossentropy",
+        embedding_func="subtract",
+    )
     trainer = Trainer(model_config)
     # load data
     trainer.load_data()
     trainer.transform_data()
     # df_features, df_targets = trainer.get_training_set()
-    df_train, df_test = trainer.get_split_training_set()
+    df_train, df = trainer.get_split_training_set()
     trainer.fit_pipelines(df_train)
     #
     inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
     targets_train = trainer.get_targets(df_train)
     # initialize and train model
-    trainer.create_model(inputs_train, vocabularies)
-    results = trainer.fit(inputs_train, targets_train)
+    trainer.create_classifier(inputs_train, vocabularies)
 
-    # model evaluation
-    trainer.evaluate_model(df_test)
+    # trainer.create_dummy_classifier(
+    #     targets_train,
+    # vocabularies,
+    # embedding_computation="add"
+    # )
+    trainer.compile_model()
+    results = trainer.fit(inputs_train, targets_train)
+    trainer.evaluate_model(df)
