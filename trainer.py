@@ -11,12 +11,12 @@ import seaborn as sns
 
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 
 import tensorflow as tf
 
 from tensorflow.keras import layers
 from tensorflow.keras.models import Model
-from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
 
 from pipelines import EMBEDDING_COLUMNS, TARGET_COLUMNS, embedding_pipe, target_pipe
 from query import QUERY
@@ -38,10 +38,10 @@ logger = logging.getLogger(__name__)
 class ModelConfig:
     test_size: float = 0.3
     embedding_dim: int = 4
-    learning_rate: float = 0.0005
-    batch_size: int = 1024
+    learning_rate: float = 0.005
+    batch_size: int = 256
     checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
-    validation_split: float = 0.4
+    validation_split: float = 0.2
     epochs: int = 2_000
     fit_verbose: int = 1
     asym_loss_gamma: float = 0.5
@@ -75,9 +75,11 @@ class Trainer:
 
     def __init__(self, model_config: ModelConfig):
         self.model_config = model_config
+        logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
         self._cursor = self._conn.cursor()
         self.df: pd.DataFrame = None
+        self.model_callbacks = []
 
     @property
     def embedding_columns(self):
@@ -222,7 +224,7 @@ class Trainer:
         user_bias = tf.keras.layers.Embedding(
             input_dim=inputs_train["user_id"].shape[0] + 1,
             output_dim=1,
-            # embeddings_regularizer="l2",
+            embeddings_regularizer="l2",
         )(user_as_integer)
 
         # sku pipeline
@@ -240,7 +242,7 @@ class Trainer:
         sku_bias = tf.keras.layers.Embedding(
             input_dim=inputs_train["sku_id"].shape[0] + 1,
             output_dim=1,
-            # embeddings_regularizer="l2"
+            embeddings_regularizer="l2",
         )(sku_as_integer)
 
         if self.model_config.embedding_func == "subtract":
@@ -277,43 +279,62 @@ class Trainer:
     def load_model(self, inputs_train, vocabularies):
         self.create_classifier(inputs_train, vocabularies)
 
-    def fit(self, Xs_train, y_train, tensorboard_on=False):
-        # self._model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        #     filepath=self.model_config.checkpoint_path,
-        #     monitor="val_loss",
-        #     # mode="min",
-        #     save_best_only=True,
-        # )
-        tf.keras.backend.clear_session()
-        tf.random.set_seed(123)
+    def create_call_backs(
+        self,
+        early_stopping=True,
+        reduce_lr=False,
+        tensorboard_on=False,
+        model_checkpoint=False,
+    ):
+        if early_stopping:
+            early_stopping_kwargs = dict(
+                monitor="val_loss",
+                patience=10,
+                verbose=2,
+                restore_best_weights=True,
+            )
+            logger.info(
+                f"Adding EarlyStopping callback with parameters: {early_stopping_kwargs}"
+            )
+            self.model_callbacks.append(
+                tf.keras.callbacks.EarlyStopping(**early_stopping_kwargs)
+            )
+        if reduce_lr:
+            reduce_lr_kwargs = dict(
+                monitor="val_loss",
+                factor=0.5,
+                patience=20,
+                verbose=2,
+                min_lr=self.model_config.learning_rate / 100,
+            )
+            logger.info(
+                f"Adding ReduceLROnPlateau callback with parameters: {reduce_lr_kwargs}"
+            )
+            self.model_callbacks.append(
+                tf.keras.callbacks.ReduceLROnPlateau(**reduce_lr_kwargs)
+            )
 
-        self._early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            min_delta=1e-5,
-            patience=50,
-            verbose=2,
-            restore_best_weights=True,
-        )
-
-        self._reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.5,
-            patience=20,
-            verbose=2,
-            min_lr=self.model_config.learning_rate / 100,
-        )
-
-        callbacks = [
-            self._early_stopping,
-            self._reduce_lr,
-        ]
         if tensorboard_on:
             log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             self._tensorboard_callback = tf.keras.callbacks.TensorBoard(
                 log_dir=log_dir, histogram_freq=1
             )
             logger.info("model callbacks created")
-            callbacks.append(self._tensorboard_callback)
+            self.model_callbacks.append(self._tensorboard_callback)
+
+        if model_checkpoint:
+            self.model_callbacks.append(
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath=self.model_config.checkpoint_path,
+                    monitor="val_loss",
+                    save_best_only=True,
+                )
+            )
+
+    def fit(self, Xs_train, y_train):
+
+        tf.keras.backend.clear_session()
+        tf.random.set_seed(123)
 
         results = self.model.fit(
             Xs_train,
@@ -322,8 +343,42 @@ class Trainer:
             batch_size=self.model_config.batch_size,
             validation_split=self.model_config.validation_split,
             verbose=self.model_config.fit_verbose,
-            callbacks=callbacks,
+            callbacks=self.model_callbacks,
         )
+        return results
+
+    def fit_with_cross_validation(self, inputs_train, targets_train, n_splits=5):
+        results = []
+
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=321)
+        for idx, (train_idx, val_idx) in enumerate(
+            skf.split(inputs_train["user_id"], inputs_train["sku_id"], targets_train)
+        ):
+            logger.info(f"Split #{idx + 1}")
+            _Xs_train = [
+                inputs_train["user_id"][train_idx, :],
+                inputs_train["sku_id"][train_idx, :],
+            ]
+            _y_train = targets_train.iloc[train_idx, :]
+
+            _Xs_val = [
+                inputs_train["user_id"][val_idx, :],
+                inputs_train["sku_id"][val_idx, :],
+            ]
+            _y_val = targets_train.iloc[val_idx, :]
+            tf.keras.backend.clear_session()
+            tf.random.set_seed(345)
+
+            _results = self.model.fit(
+                _Xs_train,
+                _y_train,
+                epochs=self.model_config.epochs,
+                batch_size=self.model_config.batch_size,
+                validation_data=(_Xs_val, _y_val),
+                verbose=self.model_config.fit_verbose,
+                callbacks=self.model_callbacks,
+            )
+            results.append(_results)
         return results
 
     def evaluate_model(self, df_test):
@@ -342,9 +397,22 @@ class Trainer:
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
+        if not (isinstance(results, list)):
+            results = [results]
         _, ax = plt.subplots(1, figsize=(7, 7))
-        ax.plot(results.history[plot_key], label=plot_key)
-        ax.plot(results.history[f"val_{plot_key}"], "-", label=f"val_{plot_key}")
+        for idx, these_results in enumerate(results):
+
+            ax.plot(
+                these_results.history[plot_key],
+                label=f"{plot_key} / {idx + 1}",
+                color="k",
+            )
+            ax.plot(
+                these_results.history[f"val_{plot_key}"],
+                "-",
+                label=f"val_{plot_key} / {idx + 1}",
+                color="r",
+            )
         ax.set_xlabel("Epoch")
         plt.legend()
         plt.grid(True)
@@ -352,24 +420,24 @@ class Trainer:
         return ax
 
     @staticmethod
-    def plot_confusion_matrix(*args: pd.DataFrame, fig_height=10):
-        fig, axs = plt.subplots(
-            1, len(args), figsize=(fig_height, fig_height * len(args))
-        )
-        axs = axs.ravel()
-        for ax, df in zip(axs, args):
+    def plot_confusion_matrix(df_dict, fig_height=5):
+        n_df = len(df_dict)
+        fig, axs = plt.subplots(1, n_df, figsize=(fig_height * n_df, fig_height))
+        if not (isinstance(axs, np.ndarray)):
+            axs = [axs]
+        for ax, (name, df) in zip(axs, df_dict.items()):
 
             cm = confusion_matrix(
                 df["predicted_rating"].astype(int), df["rating"].astype(int)
             )
-
-            ax = sns.heatmap(cm, annot=True, fmt="d")
+            ax = sns.heatmap(cm, annot=True, fmt="d", ax=ax)
             ax.set_xlabel("Actual Rating")
             ax.set_xticklabels(range(1, 6))
             ax.set_ylabel("Predicted Rating")
             ax.set_yticklabels(range(1, 6))
             ax.invert_yaxis()
-            plt.show()
+            ax.set_title(name)
+        plt.show()
         return fig, axs
 
 
@@ -384,7 +452,7 @@ if __name__ == "__main__":
     trainer.load_data()
     trainer.transform_data()
     # df_features, df_targets = trainer.get_training_set()
-    df_train, df = trainer.get_split_training_set()
+    df_train, df_test = trainer.get_split_training_set()
     trainer.fit_pipelines(df_train)
     #
     inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
@@ -392,11 +460,8 @@ if __name__ == "__main__":
     # initialize and train model
     trainer.create_classifier(inputs_train, vocabularies)
 
-    # trainer.create_dummy_classifier(
-    #     targets_train,
-    # vocabularies,
-    # embedding_computation="add"
-    # )
+    # trainer.create_dummy_classifier(targets_train)
     trainer.compile_model()
-    results = trainer.fit(inputs_train, targets_train)
-    trainer.evaluate_model(df)
+    trainer.create_call_backs()
+    results = trainer.fit_with_cross_validation(inputs_train, targets_train, n_splits=3)
+    # trainer.evaluate_model(df_test)
