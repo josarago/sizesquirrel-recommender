@@ -2,9 +2,9 @@ QUERY = """
 select user_item.id
     , user_item.user_id
     , user_item.item_id
-    , user.street_shoe_size_in
+    , cast(user.street_shoe_size_in as float) as street_shoe_size_in
     , user.foot_shape as user_foot_shape
-    , user.gender as user_gender
+    , cast(user.gender as int) as user_gender
     , user.climbing_boulder
     , user.climbing_sport
     , user.climbing_trad
