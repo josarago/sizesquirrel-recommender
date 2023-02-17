@@ -14,7 +14,7 @@ select user_item.id
     , gender.name as shoe_gender
     , user_item.size as size
 --    , cast(user_item.size_in as float) as size_in
-    , cast(user_item.rating as float) as rating
+    , cast(user_item.rating as int) as rating
     , cast(user_item.fit as float) as fit
     , item.brand_id
     , item.type as item_type

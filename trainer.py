@@ -20,7 +20,7 @@ from tensorflow.keras.models import Model
 
 from pipelines import (
     EMBEDDING_COLUMNS,
-    TARGET_COLUMNS,
+    TARGET_COLUMN,
     embedding_pipe,
     target_pipe,
     user_features_pipe,
@@ -54,6 +54,7 @@ class ModelConfig:
     asym_loss_gamma: float = 0.5
     classification_loss: str = "categorical_crossentropy"
     embedding_func: str = "subtract"
+    early_stopping__restore_best_weights: bool = True
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -80,7 +81,7 @@ class Trainer:
     user_features_pipe = user_features_pipe
     shoe_size_in_pipe = shoe_size_in_pipe
     _embedding_columns = EMBEDDING_COLUMNS
-    _target_columns = TARGET_COLUMNS
+    _target_column = TARGET_COLUMN
 
     def __init__(self, model_config: ModelConfig):
         self.model_config = model_config
@@ -96,7 +97,7 @@ class Trainer:
 
     @property
     def target_columns(self):
-        return self._target_columns
+        return self._target_column
 
     def load_data(self):
         logger.info(f"using file at '{self._db_file_path}'")
@@ -154,12 +155,15 @@ class Trainer:
         self.df["size_in"] = self.df["size"].apply(self.convert_shoe_size_to_inches)
         self.df["sku_id"] = self.compute_sku_id(self.df)
 
-    def get_split_training_set(self, test_size=None, chronological_split=False):
+    def get_split_training_set(
+        self, test_size=None, stratify_split=True, chronological_split=False
+    ):
         if chronological_split:
             self.df.sort_values("id", inplace=True)
         df_train, df_test = train_test_split(
             self.df,
             test_size=test_size if test_size else self.model_config.test_size,
+            stratify=self.df[self._target_column] if stratify_split else None,
             shuffle=not (chronological_split),
             random_state=1234,
         )
@@ -170,14 +174,11 @@ class Trainer:
         self.embedding_pipe.fit(df_train)
         self.user_features_pipe.fit(df_train)
         self.shoe_size_in_pipe.fit(df_train)
-        self.target_pipe.fit(df_train)
+        self.target_pipe.fit(df_train[self._target_column])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
-        embedding_inputs = {
-            col: embedding_df[col].values.reshape(-1, 1)
-            for col in self.embedding_columns
-        }
+        embedding_inputs = {col: embedding_df[[col]] for col in self.embedding_columns}
         embedding_vocabs = {
             col: embedding_df[col].unique() for col in self.embedding_columns
         }
@@ -193,7 +194,7 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df)
+        y = self.target_pipe.transform(df[self._target_column])
         return y
 
     def get_inputs_dict(self, df):
@@ -205,7 +206,7 @@ class Trainer:
 
     def compute_user_item_mat_df(self):
         self.user_sku_mat_df = self.df.pivot_table(
-            index=["user_id"], columns=["sku_id"], values=self._target_columns
+            index=["user_id"], columns=["sku_id"], values=self._target_column
         )
         logger.info(f"{self.user_sku_mat_parsity:.2%}")
 
@@ -244,7 +245,7 @@ class Trainer:
         sku_embedding = layers.Embedding(
             input_dim=len(vocabularies["sku_id"]) + 1,
             output_dim=self.model_config.embedding_dim,
-            embeddings_regularizer="l2",
+            # embeddings_regularizer=regularizers.L2(l2=0.02),
         )(sku_as_integer)
 
         flattened_sku_embedding = layers.Flatten()(sku_embedding)
@@ -271,7 +272,7 @@ class Trainer:
         user_embedding = layers.Embedding(
             input_dim=len(vocabularies["user_id"]) + 1,
             output_dim=self.model_config.embedding_dim,
-            embeddings_regularizer="l2",
+            # embeddings_regularizer=regularizers.L2(l2=0.02),
         )(user_as_integer)
 
         flattened_user_embedding = layers.Flatten()(user_embedding)
@@ -341,7 +342,7 @@ class Trainer:
                 monitor="val_loss",
                 patience=10,
                 verbose=2,
-                restore_best_weights=True,
+                restore_best_weights=self.model_config.early_stopping__restore_best_weights,
             )
             logger.info(
                 f"Adding EarlyStopping callback with parameters: {early_stopping_kwargs}"
@@ -381,52 +382,54 @@ class Trainer:
                 )
             )
 
-    def fit(self, inputs_dict, y_train):
+    def fit(self, inputs_dict, targets_train, validation_data=None):
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
+        if validation_data is not None:
+            validation_split = None
+        else:
+            validation_split = self.model_config.validation_split
 
         results = self.model.fit(
             inputs_dict,
-            y_train,
+            targets_train,
             epochs=self.model_config.epochs,
             batch_size=self.model_config.batch_size,
-            validation_split=self.model_config.validation_split,
+            validation_split=validation_split,
+            validation_data=validation_data,
             verbose=self.model_config.fit_verbose,
             callbacks=self.model_callbacks,
         )
         return results
 
-    def fit_with_cross_validation(self, inputs_train, targets_train, n_splits=5):
+    def fit_with_cross_validation(self, inputs_dict, targets_train, n_splits):
         results = []
 
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=321)
+        # need to go back to categories because of StratifiedKFold
+        # y_train = np.apply_along_axis(targets_train.np.argmax, axis=1) + 1
+        labels_train = self.target_pipe.inverse_transform(targets_train)
         for idx, (train_idx, val_idx) in enumerate(
-            skf.split(inputs_train["user_id"], inputs_train["sku_id"], targets_train)
+            skf.split(labels_train, labels_train)
         ):
             logger.info(f"Split #{idx + 1}")
-            _Xs_train = [
-                inputs_train["user_id"][train_idx, :],
-                inputs_train["sku_id"][train_idx, :],
-            ]
-            _y_train = targets_train.iloc[train_idx, :]
+            inputs_train_fold = {
+                key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
+            }
+            targets_train_fold = targets_train[train_idx, :]
 
-            _Xs_val = [
-                inputs_train["user_id"][val_idx, :],
-                inputs_train["sku_id"][val_idx, :],
-            ]
-            _y_val = targets_train.iloc[val_idx, :]
+            inputs_val_fold = {
+                key: df.iloc[val_idx, :] for key, df in inputs_dict.items()
+            }
+
+            targets_val_fold = targets_train[val_idx, :]
             tf.keras.backend.clear_session()
             tf.random.set_seed(345)
-
-            _results = self.model.fit(
-                _Xs_train,
-                _y_train,
-                epochs=self.model_config.epochs,
-                batch_size=self.model_config.batch_size,
-                validation_data=(_Xs_val, _y_val),
-                verbose=self.model_config.fit_verbose,
-                callbacks=self.model_callbacks,
+            _results = self.fit(
+                inputs_train_fold,
+                targets_train_fold,
+                validation_data=(inputs_val_fold, targets_val_fold),
             )
             results.append(_results)
         return results
@@ -447,6 +450,8 @@ class Trainer:
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
+        training_color = np.array([0, 0, 0])
+        loss_color = np.array([1, 0, 0])
         if not (isinstance(results, list)):
             results = [results]
         _, ax = plt.subplots(1, figsize=(7, 7))
@@ -455,14 +460,17 @@ class Trainer:
             ax.plot(
                 these_results.history[plot_key],
                 label=f"{plot_key} / {idx + 1}",
-                color="k",
+                color=training_color,
             )
             ax.plot(
                 these_results.history[f"val_{plot_key}"],
                 "-",
                 label=f"val_{plot_key} / {idx + 1}",
-                color="r",
+                color=loss_color,
             )
+
+            training_color = 1 - ((1 - training_color) * 0.8)
+            loss_color = 1 - ((1 - loss_color) * 0.8)
         ax.set_xlabel("Epoch")
         plt.legend()
         plt.grid(True)
@@ -495,6 +503,7 @@ if __name__ == "__main__":
     model_config = ModelConfig(
         fit_verbose=0,
         learning_rate=0.00005,
+        epochs=10,
         classification_loss="categorical_crossentropy",
         embedding_func="subtract",
         embedding_dim=3,
@@ -517,8 +526,8 @@ if __name__ == "__main__":
 
     trainer.compile_model()
     trainer.create_call_backs()
-    results = trainer.fit(inputs_train, targets_train)
+    # results = trainer.fit(inputs_train, targets_train)
 
     # trainer.create_dummy_classifier(targets_train)
-    # results = trainer.fit_with_cross_validation(inputs_train, targets_train, n_splits=3)
-    trainer.evaluate_model(df_test)
+    results = trainer.fit_with_cross_validation(inputs_train, targets_train, n_splits=3)
+    # trainer.evaluate_model(df_test)
