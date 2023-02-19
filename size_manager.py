@@ -1,56 +1,86 @@
-import os
+import pathlib
 import pandas as pd
 
-"""
-Workflow:
-- load the training set
-- get all items from training set (brand + model + gender)
-- get size map from file `data/sizing_systems/<brand_name>/<model> - <year>
-- convert all sizes to european (make sure men US and women US map to a single European sizing scale)
-- create heuristic for data augmentation:
-	- for instance, if rating for a given size ~ 
-"""
-
-
-BRANDS = ("la sportiva",)
-SIZING_SYSTEMS_DIR = os.path.join("data", "sizing_systems")
+from config import SIZING_SYSTEM_DIR_PATH
 
 
 class SizeManager:
-    sizing_systems_dir = SIZING_SYSTEMS_DIR
+    def __init__(
+        self, user_item_df: pd.DataFrame, sizing_system_dir_path=SIZING_SYSTEM_DIR_PATH
+    ) -> None:
+        self.user_item_df = user_item_df
+        self.sizing_system_dir_path = sizing_system_dir_path
+        self.sizing_df = self.get_sizing_df()
 
-    def __init__(self, df, brand_name="la sportiva", model="tc pro", gender="men"):
-        self.df = df
-        self._brand_name = brand_name
-        self._model = model
-        self._gender = gender
-
-    @property
-    def brand_name(self):
-        return self._brand_name
-
-    @property
-    def shoe_model(self):
-        return self._shoe_model
-
-    @property
-    def gender(self):
-        return self._gender
-
-    def get_known_sizes(self):
-        return sorted(
-            self.df.query(f"brand_name=='{self.brand_name}'")
-            .query(f"model=='{self.model}'")
-            .query(f"gender=='{self.gender}'")["size"]
-            .unique()
-        )
-
-    def create_all_skus(
-        self, known_sizes, brand_name="la sportiva", model="tc pro", gender="men"
+    def get_sizing_df(
+        self,
     ):
-        _df = pd.DataFrame(data={"size": known_sizes})
-        _df["brand_name"] = brand_name
-        _df["model"] = model
-        _df["gender"] = gender
-        _df["sku_id"] = trainer.compute_sku_id(_df)
-        return _df.sort_values("size")
+        # we store all .csv files in a list
+        filelist = []
+        for root, dirs, files in os.walk(self.sizing_system_dir_path):
+            for file in files:
+                # append the file name to the list
+                if pathlib.Path(file).suffix == ".csv":
+                    filelist.append(pathlib.PurePath(root, file))
+
+        # for each file, load the data
+        df = pd.DataFrame()
+        for file_path in filelist:
+            p = pathlib.Path(file_path)
+            model = p.stem
+            brand_name = p.parent.name
+            _df = pd.read_csv(file_path, usecols=["us_men", "euro", "us_women"])
+            _df["model"] = model
+            _df["brand_name"] = brand_name
+            df = pd.concat([df, _df])
+
+        men_df = df[["brand_name", "model", "us_men", "euro"]].rename(
+            columns={"us_men": "us_size", "euro": "euro_size"}
+        )
+        men_df.insert(2, "shoe_gender", "men")
+
+        women_df = df[["brand_name", "model", "us_women", "euro"]].rename(
+            columns={"us_women": "us_size", "euro": "euro_size"}
+        )
+        women_df.insert(2, "shoe_gender", "women")
+        sizing_df = pd.concat([men_df, women_df]).dropna(subset=["us_size"])
+        sizing_df["us_size"] = sizing_df["us_size"].apply(
+            lambda x: x + ".0" if not ("." in x) else x
+        )
+        return sizing_df
+
+    @staticmethod
+    def convert_to_euro_size(row):
+        if row["sizing_system"] == "EURO":
+            return row["size"]
+        if not (row["converted_euro_size"] is None):
+            return row["converted_euro_size"]
+        else:
+            return pd.NaT
+
+    def convert_to_euro_sizes(self):
+        """
+        user_item_df: user-item dataframe, typically .df attrubute of Trainer instance
+        sizing_df:
+        """
+        merged_df = (
+            self.user_item_df
+            # [
+            #     ["brand_name", "model", "shoe_gender", "size", "sizing_system"]
+            # ]
+            .astype({"size": str})
+            .merge(
+                self.sizing_df,
+                left_on=["brand_name", "model", "shoe_gender", "size"],
+                right_on=["brand_name", "model", "shoe_gender", "us_size"],
+                how="left",
+            )
+            .rename(columns={"euro_size": "converted_euro_size"})
+        )
+        merged_df["euro_size"] = merged_df.apply(self.convert_to_euro_size, axis=1)
+        return merged_df.drop(columns=["us_size"])
+
+
+if __name__ == "__main__":
+    size_manager = SizeManager(None)
+    print(size_manager.sizing_df)
