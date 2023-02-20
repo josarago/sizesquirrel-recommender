@@ -200,26 +200,6 @@ class Trainer:
         self.user_features_dim = inputs_dict["user_features"].shape[1]
         return inputs_dict, embedding_vocabs
 
-    def compute_user_item_mat_df(self):
-        self.user_sku_mat_df = self.user_item_df.pivot_table(
-            index=["user_id"], columns=["sku_id"], values=self._target_column
-        )
-        logger.info(f"{self.user_sku_mat_parsity:.2%}")
-
-    @property
-    def all_users(self):
-        return self.user_item_df["user_id"].unique()
-
-    @property
-    def all_skus(self):
-        return self.user_item_df["sku_id"].unique()
-
-    @property
-    def user_sku_mat_parsity(self):
-        return self.user_sku_mat_df.notnull().sum().sum() / (
-            self.user_sku_mat_df.shape[0] * self.user_sku_mat_df.shape[1]
-        )
-
     def create_dummy_classifier(self, targets_train):
         mean_proba = targets_train.mean().values.T.reshape(1, -1)
 
