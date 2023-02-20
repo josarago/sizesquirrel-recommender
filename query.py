@@ -8,15 +8,15 @@ select user_item.id
     , user.climbing_boulder
     , user.climbing_sport
     , user.climbing_trad
-    , item.asin    
+--    , item.asin    
     , brand.name as brand_name
     , item.model
     , gender.name as shoe_gender
     , user_item.size as size
 --    , cast(user_item.size_in as float) as size_in
     , cast(user_item.rating as int) as rating
-    , cast(user_item.fit as float) as fit
-    , item.brand_id
+--    , cast(user_item.fit as float) as fit
+--    , item.brand_id
     , item.type as item_type
 from user_item
 left join item
