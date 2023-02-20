@@ -24,7 +24,7 @@ from pipelines import (
     embedding_pipe,
     target_pipe,
     user_features_pipe,
-    shoe_size_in_pipe,
+    sku_features_pipe,
 )
 from query import QUERY
 
@@ -71,7 +71,7 @@ class Trainer:
     embedding_pipe = embedding_pipe
     target_pipe = target_pipe
     user_features_pipe = user_features_pipe
-    shoe_size_in_pipe = shoe_size_in_pipe
+    sku_features_pipe = sku_features_pipe
     _embedding_columns = EMBEDDING_COLUMNS
     _target_column = TARGET_COLUMN
 
@@ -80,7 +80,7 @@ class Trainer:
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
         self._cursor = self._conn.cursor()
-        self.user_item_df: pd.DataFrame = None
+        self.user_sku_df: pd.DataFrame = None
         self.model_callbacks = []
 
     @property
@@ -93,10 +93,10 @@ class Trainer:
 
     def load_data(self):
         logger.info(f"using file at '{self._db_file_path}'")
-        self.user_item_df = pd.read_sql_query(self._query, self._conn)
+        self.user_sku_df = pd.read_sql_query(self._query, self._conn)
         # logger.info(f"Loading data with query: {QUERY}'")
         logger.info(
-            f"Loaded data: {self.user_item_df.shape[1]} columns and {self.user_item_df.shape[0]:,} rows"
+            f"Loaded data: {self.user_sku_df.shape[1]} columns and {self.user_sku_df.shape[0]:,} rows"
         )
 
     @staticmethod
@@ -143,23 +143,23 @@ class Trainer:
 
     def transform_data(self):
         logger.info(f"transforming data: computing `sizing system` and `size_in`")
-        self.user_item_df["sizing_system"] = self.user_item_df["size"].apply(
+        self.user_sku_df["sizing_system"] = self.user_sku_df["size"].apply(
             self.get_sizing_system
         )
-        self.user_item_df["size_in"] = self.user_item_df["size"].apply(
+        self.user_sku_df["size_in"] = self.user_sku_df["size"].apply(
             self.convert_shoe_size_to_inches
         )
-        self.user_item_df["sku_id"] = self.compute_sku_id(self.user_item_df)
+        self.user_sku_df["sku_id"] = self.compute_sku_id(self.user_sku_df)
 
     def get_split_training_set(
         self, test_size=None, stratify_split=True, chronological_split=False
     ):
         if chronological_split:
-            self.user_item_df.sort_values("id", inplace=True)
+            self.user_sku_df.sort_values("id", inplace=True)
         df_train, df_test = train_test_split(
-            self.user_item_df,
+            self.user_sku_df,
             test_size=test_size if test_size else self.model_config.test_size,
-            stratify=self.user_item_df[self._target_column] if stratify_split else None,
+            stratify=self.user_sku_df[self._target_column] if stratify_split else None,
             shuffle=not (chronological_split),
             random_state=1234,
         )
@@ -169,7 +169,7 @@ class Trainer:
         # features
         self.embedding_pipe.fit(df_train)
         self.user_features_pipe.fit(df_train)
-        self.shoe_size_in_pipe.fit(df_train)
+        self.sku_features_pipe.fit(df_train)
         self.target_pipe.fit(df_train[self._target_column])
 
     def get_embedding_inputs(self, df):
@@ -186,7 +186,7 @@ class Trainer:
         return user_features_inputs
 
     def get_sku_features_inputs(self, df):
-        sku_features_inputs = self.shoe_size_in_pipe.transform(df)
+        sku_features_inputs = self.sku_features_pipe.transform(df)
         return sku_features_inputs
 
     def get_targets(self, df):
@@ -198,6 +198,7 @@ class Trainer:
         inputs_dict["user_features"] = self.get_user_features_inputs(df)
         inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
         self.user_features_dim = inputs_dict["user_features"].shape[1]
+        self.sku_features_dim = inputs_dict["sku_features"].shape[1]
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
@@ -228,7 +229,9 @@ class Trainer:
 
         flattened_sku_embedding = layers.Flatten()(sku_embedding)
 
-        sku_features_input = layers.Input(shape=(1,), name="sku_features")
+        sku_features_input = layers.Input(
+            shape=(self.sku_features_dim,), name="sku_features"
+        )
 
         concat_sku = layers.Concatenate(axis=1)(
             [flattened_sku_embedding, sku_features_input]
