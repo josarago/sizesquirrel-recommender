@@ -156,3 +156,10 @@ cython_debug/
 
 # tensorflow
 **/logs/*
+
+#vscode
+*.code-workspace
+
+# plot_model
+*.png
+draft.py

@@ -1,5 +1,11 @@
-from sklearn.preprocessing import OrdinalEncoder, LabelEncoder, OneHotEncoder
-from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import (
+    OrdinalEncoder,
+    FunctionTransformer,
+    OneHotEncoder,
+    LabelBinarizer,
+)
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline, FeatureUnion
 from sklego.preprocessing import ColumnSelector
 
 from sklearn import set_config
@@ -7,7 +13,8 @@ from sklearn import set_config
 set_config(transform_output="pandas")
 
 EMBEDDING_COLUMNS = ["user_id", "sku_id"]
-TARGET_COLUMNS = ["rating"]
+TARGET_CATEGORIES = [1, 2, 3, 4, 5]
+TARGET_COLUMN = "rating"
 
 embedding_pipe = Pipeline(
     steps=[
@@ -25,10 +32,58 @@ embedding_pipe = Pipeline(
     ]
 )
 
+SIZE_IN_SCALE = 15
 
-target_pipe = Pipeline(
+user_street_shoe_size_in_pipe = Pipeline(
     steps=[
-        ("embedding_columns", ColumnSelector(TARGET_COLUMNS)),
-        ("one_hot_enc", OneHotEncoder(sparse_output=False)),
+        ("user_street_shoe_size_in", ColumnSelector("street_shoe_size_in")),
+        ("imputer", SimpleImputer(fill_value=-SIZE_IN_SCALE)),
+        ("scale", FunctionTransformer(lambda x: x / SIZE_IN_SCALE)),
     ]
 )
+
+USER_CATEGORICAL_FEATURES = ["user_gender", "user_foot_shape"]
+
+user_categorical_pipe = Pipeline(
+    steps=[
+        ("user_categories", ColumnSelector(USER_CATEGORICAL_FEATURES)),
+        ("one_hot", OneHotEncoder(drop="first", sparse_output=False)),
+    ]
+)
+
+user_features_pipe = FeatureUnion(
+    [
+        ("user_street_shoe_size", user_street_shoe_size_in_pipe),
+        ("user_categorical", user_categorical_pipe),
+    ]
+)
+# - categorical
+#     - gender
+#     - climbing_<style>
+#     - foot shape
+
+# item features:
+# - numerical
+#    - size_in (stored in user_item)
+# - categorical
+#     - gender_id
+#     - type
+
+SKU_NUMERICAL_FEATURES = ["size_in"]
+
+shoe_size_in_pipe = Pipeline(
+    steps=[
+        ("shoe_size_in", ColumnSelector(SKU_NUMERICAL_FEATURES)),
+        ("imputer", SimpleImputer(fill_value=-SIZE_IN_SCALE)),
+        ("scale", FunctionTransformer(lambda x: x / SIZE_IN_SCALE)),
+    ]
+)
+
+USED_COLUMNS = (
+    EMBEDDING_COLUMNS
+    + USER_CATEGORICAL_FEATURES
+    + SKU_NUMERICAL_FEATURES
+    + [TARGET_COLUMN]
+)
+
+target_pipe = LabelBinarizer()
