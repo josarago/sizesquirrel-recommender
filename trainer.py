@@ -12,6 +12,8 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
+from sklearn.utils.class_weight import compute_class_weight
+
 
 import tensorflow as tf
 
@@ -20,6 +22,7 @@ from tensorflow.keras.models import Model
 
 from pipelines import (
     EMBEDDING_COLUMNS,
+    TARGET_CATEGORIES,
     TARGET_COLUMN,
     embedding_pipe,
     target_pipe,
@@ -363,7 +366,21 @@ class Trainer:
                 )
             )
 
-    def fit(self, inputs_dict, targets_train, embedding_vocabs, validation_data=None):
+    @staticmethod
+    def get_class_weight(df_train):
+        class_weights = compute_class_weight(
+            class_weight="balanced", classes=TARGET_CATEGORIES, y=df_train["rating"]
+        )
+        return {idx: class_weight for idx, class_weight in enumerate(class_weights)}
+
+    def fit(
+        self,
+        inputs_dict,
+        targets_train,
+        embedding_vocabs,
+        validation_data=None,
+        class_weight=None,
+    ):
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
@@ -377,7 +394,6 @@ class Trainer:
             validation_split = None
         else:
             validation_split = self.model_config.validation_split
-
         results = self.model.fit(
             inputs_dict,
             targets_train,
@@ -387,11 +403,17 @@ class Trainer:
             validation_data=validation_data,
             verbose=self.model_config.fit_verbose,
             callbacks=self.model_callbacks,
+            class_weight=class_weight,
         )
         return results
 
     def fit_with_cross_validation(
-        self, inputs_dict, targets_train, embedding_vocabs, n_splits
+        self,
+        inputs_dict,
+        targets_train,
+        embedding_vocabs,
+        n_splits,
+        class_weight=None,
     ):
         results = []
 
@@ -417,6 +439,7 @@ class Trainer:
                 targets_train_fold,
                 embedding_vocabs,
                 validation_data=(inputs_val_fold, targets_val_fold),
+                class_weight=class_weight,
             )
             logger.info(f"Model trained on split #{idx + 1}")
             results.append(_results)
@@ -517,10 +540,15 @@ if __name__ == "__main__":
 
     # trainer.compile_model()
     # trainer.create_call_backs()
-    # results = trainer.fit(inputs_train, targets_train, embedding_vocabs)
+    results = trainer.fit(
+        inputs_train,
+        targets_train,
+        embedding_vocabs,
+        class_weight=trainer.get_class_weight(df_train),
+    )
 
     # trainer.create_dummy_classifier(targets_train)
-    results = trainer.fit_with_cross_validation(
-        inputs_train, targets_train, embedding_vocabs, n_splits=3
-    )
+    # results = trainer.fit_with_cross_validation(
+    #     inputs_train, targets_train, embedding_vocabs, n_splits=3
+    # )
     trainer.evaluate_model(df_test)
