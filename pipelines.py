@@ -69,13 +69,21 @@ user_features_pipe = FeatureUnion(
 #     - gender_id
 #     - type
 
+SKU_NUMERICAL_FEATURES = ["size_in"]
+
 shoe_size_in_pipe = Pipeline(
     steps=[
-        ("shoe_size_in", ColumnSelector("size_in")),
+        ("shoe_size_in", ColumnSelector(SKU_NUMERICAL_FEATURES)),
         ("imputer", SimpleImputer(fill_value=-SIZE_IN_SCALE)),
         ("scale", FunctionTransformer(lambda x: x / SIZE_IN_SCALE)),
     ]
 )
 
+USED_COLUMNS = (
+    EMBEDDING_COLUMNS
+    + USER_CATEGORICAL_FEATURES
+    + SKU_NUMERICAL_FEATURES
+    + [TARGET_COLUMN]
+)
 
 target_pipe = LabelBinarizer()
