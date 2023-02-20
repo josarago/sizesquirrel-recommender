@@ -5,9 +5,9 @@ select user_item.id
     , cast(user.street_shoe_size_in as float) as street_shoe_size_in
     , user.foot_shape as user_foot_shape
     , cast(user.gender as int) as user_gender
-    , user.climbing_boulder
-    , user.climbing_sport
-    , user.climbing_trad
+    , user.climbing_boulder as bouldering
+    , user.climbing_sport as sport_climbing
+    , user.climbing_trad as trad_climbing
 --    , item.asin    
     , brand.name as brand_name
     , item.model
