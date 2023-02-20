@@ -49,6 +49,7 @@ class ModelConfig:
     asym_loss_gamma: float = 0.5
     classification_loss: str = "categorical_crossentropy"
     embedding_func: str = "subtract"
+    early_stopping__patience: int = 50
     early_stopping__restore_best_weights: bool = True
 
 
@@ -205,7 +206,7 @@ class Trainer:
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
-        mean_proba = targets_train.mean().values.T.reshape(1, -1)
+        mean_proba = targets_train.mean().T.reshape(1, -1)
 
         def constant_output(x):
             batch_size = tf.shape(x)[0]
@@ -286,9 +287,10 @@ class Trainer:
         else:
             raise ValueError("`embedding_func` can be either `subtract` or `dot`")
 
-        # hidden0 = layers.Dense(11, activation="relu")(flatten)
+        hidden = layers.Dense(11, activation="relu")(tmp_out)
+        dropout = layers.Dropout(0.5)(tmp_out)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
-        out = layers.Dense(5, kernel_regularizer="l2", activation="softmax")(tmp_out)
+        out = layers.Dense(5, kernel_regularizer="l2", activation="softmax")(dropout)
         # model input/output definition
         self.model = Model(
             inputs=[
@@ -324,7 +326,7 @@ class Trainer:
         if early_stopping:
             early_stopping_kwargs = dict(
                 monitor="val_loss",
-                patience=10,
+                patience=self.model_config.early_stopping__patience,
                 verbose=2,
                 restore_best_weights=self.model_config.early_stopping__restore_best_weights,
             )
@@ -384,7 +386,6 @@ class Trainer:
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
-
         self.create_classifier(embedding_vocabs)
 
         self.compile_model()
@@ -517,11 +518,11 @@ if __name__ == "__main__":
     model_config = ModelConfig(
         fit_verbose=0,
         learning_rate=0.00005,
-        epochs=10,
+        epochs=1_000,
         classification_loss="categorical_crossentropy",
         embedding_func="subtract",
         embedding_dim=3,
-        batch_size=128,
+        batch_size=1024,
     )
     trainer = Trainer(model_config)
     # load data
@@ -535,20 +536,12 @@ if __name__ == "__main__":
     # user_features_inputs_train = trainer.get_user_features_inputs(df_train)
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
-    # initialize and train model
-    # trainer.create_classifier(embedding_vocabs)
 
-    # trainer.compile_model()
-    # trainer.create_call_backs()
     results = trainer.fit(
         inputs_train,
         targets_train,
         embedding_vocabs,
-        class_weight=trainer.get_class_weight(df_train),
+        class_weight=None,
     )
 
-    # trainer.create_dummy_classifier(targets_train)
-    # results = trainer.fit_with_cross_validation(
-    #     inputs_train, targets_train, embedding_vocabs, n_splits=3
-    # )
     trainer.evaluate_model(df_test)
