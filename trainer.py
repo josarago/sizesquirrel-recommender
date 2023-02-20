@@ -1,5 +1,5 @@
 import os
-import logging
+
 import datetime
 import sqlite3 as db
 import numpy as np
@@ -15,23 +15,22 @@ from sklearn.model_selection import StratifiedKFold
 
 import tensorflow as tf
 
-from tensorflow.keras import layers
+from tensorflow.keras import layers, regularizers
 from tensorflow.keras.models import Model
 
-from pipelines import EMBEDDING_COLUMNS, TARGET_COLUMNS, embedding_pipe, target_pipe
+from pipelines import (
+    EMBEDDING_COLUMNS,
+    TARGET_COLUMN,
+    embedding_pipe,
+    target_pipe,
+    user_features_pipe,
+    shoe_size_in_pipe,
+)
 from query import QUERY
 
-DATA_DIR_PATH = "data"
-DB_FILENAME = "production-database.20230207.sanitized.db"
-DB_FILE_PATH = os.path.join(DATA_DIR_PATH, DB_FILENAME)
-US_EURO_SIZE_THRESHOLD = 25
+from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
-    datefmt="%Y-%m-%d:%H:%M:%S",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -47,6 +46,7 @@ class ModelConfig:
     asym_loss_gamma: float = 0.5
     classification_loss: str = "categorical_crossentropy"
     embedding_func: str = "subtract"
+    early_stopping__restore_best_weights: bool = True
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -70,15 +70,17 @@ class Trainer:
     _db_file_path = DB_FILE_PATH
     embedding_pipe = embedding_pipe
     target_pipe = target_pipe
+    user_features_pipe = user_features_pipe
+    shoe_size_in_pipe = shoe_size_in_pipe
     _embedding_columns = EMBEDDING_COLUMNS
-    _target_columns = TARGET_COLUMNS
+    _target_column = TARGET_COLUMN
 
     def __init__(self, model_config: ModelConfig):
         self.model_config = model_config
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
         self._cursor = self._conn.cursor()
-        self.df: pd.DataFrame = None
+        self.user_item_df: pd.DataFrame = None
         self.model_callbacks = []
 
     @property
@@ -87,14 +89,14 @@ class Trainer:
 
     @property
     def target_columns(self):
-        return self._target_columns
+        return self._target_column
 
     def load_data(self):
         logger.info(f"using file at '{self._db_file_path}'")
-        self.df = pd.read_sql_query(self._query, self._conn)
+        self.user_item_df = pd.read_sql_query(self._query, self._conn)
         # logger.info(f"Loading data with query: {QUERY}'")
         logger.info(
-            f"Loaded data: {self.df.shape[1]} columns and {self.df.shape[0]:,} rows"
+            f"Loaded data: {self.user_item_df.shape[1]} columns and {self.user_item_df.shape[0]:,} rows"
         )
 
     @staticmethod
@@ -141,60 +143,62 @@ class Trainer:
 
     def transform_data(self):
         logger.info(f"transforming data: computing `sizing system` and `size_in`")
-        self.df["sizing_system"] = self.df["size"].apply(self.get_sizing_system)
-        self.df["size_in"] = self.df["size"].apply(self.convert_shoe_size_to_inches)
-        self.df["sku_id"] = self.compute_sku_id(self.df)
+        self.user_item_df["sizing_system"] = self.user_item_df["size"].apply(
+            self.get_sizing_system
+        )
+        self.user_item_df["size_in"] = self.user_item_df["size"].apply(
+            self.convert_shoe_size_to_inches
+        )
+        self.user_item_df["sku_id"] = self.compute_sku_id(self.user_item_df)
 
-    def get_split_training_set(self, test_size=None, chronological_split=False):
+    def get_split_training_set(
+        self, test_size=None, stratify_split=True, chronological_split=False
+    ):
         if chronological_split:
-            self.df.sort_values("id", inplace=True)
+            self.user_item_df.sort_values("id", inplace=True)
         df_train, df_test = train_test_split(
-            self.df,
+            self.user_item_df,
             test_size=test_size if test_size else self.model_config.test_size,
+            stratify=self.user_item_df[self._target_column] if stratify_split else None,
             shuffle=not (chronological_split),
             random_state=1234,
         )
         return df_train, df_test
 
     def fit_pipelines(self, df_train):
+        # features
         self.embedding_pipe.fit(df_train)
-        self.target_pipe.fit(df_train)
+        self.user_features_pipe.fit(df_train)
+        self.shoe_size_in_pipe.fit(df_train)
+        self.target_pipe.fit(df_train[self._target_column])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
-        inputs = {
-            col: embedding_df[col].values.reshape(-1, 1)
-            for col in self.embedding_columns
-        }
-        vocabularies = {
+        embedding_inputs = {col: embedding_df[[col]] for col in self.embedding_columns}
+        embedding_vocabs = {
             col: embedding_df[col].unique() for col in self.embedding_columns
         }
-        logger.info(f"Creating {len(inputs.keys())} model inputs")
-        return inputs, vocabularies
+        logger.info(f"Creating {len(embedding_inputs.keys())} model inputs")
+        return embedding_inputs, embedding_vocabs
+
+    def get_user_features_inputs(self, df):
+        user_features_inputs = self.user_features_pipe.transform(df)
+        return user_features_inputs
+
+    def get_sku_features_inputs(self, df):
+        sku_features_inputs = self.shoe_size_in_pipe.transform(df)
+        return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df)
+        y = self.target_pipe.transform(df[self._target_column])
         return y
 
-    def compute_user_item_mat_df(self):
-        self.user_sku_mat_df = self.df.pivot_table(
-            index=["user_id"], columns=["sku_id"], values=self._target_columns
-        )
-        logger.info(f"{self.user_sku_mat_parsity:.2%}")
-
-    @property
-    def all_users(self):
-        return self.df["user_id"].unique()
-
-    @property
-    def all_skus(self):
-        return self.df["sku_id"].unique()
-
-    @property
-    def user_sku_mat_parsity(self):
-        return self.user_sku_mat_df.notnull().sum().sum() / (
-            self.user_sku_mat_df.shape[0] * self.user_sku_mat_df.shape[1]
-        )
+    def get_inputs_dict(self, df):
+        inputs_dict, embedding_vocabs = self.get_embedding_inputs(df)
+        inputs_dict["user_features"] = self.get_user_features_inputs(df)
+        inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
+        self.user_features_dim = inputs_dict["user_features"].shape[1]
+        return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
         mean_proba = targets_train.mean().values.T.reshape(1, -1)
@@ -207,63 +211,88 @@ class Trainer:
         out = layers.Lambda(constant_output)(user_input)
         self.model = Model(inputs=[user_input], outputs=out)
 
-    def create_classifier(self, inputs_train, vocabularies):
-        # user pipeline
-        user_input = layers.Input(shape=(1,), name="user_id")
-
-        user_as_integer = layers.IntegerLookup(vocabulary=vocabularies["user_id"])(
-            user_input
-        )
-
-        user_embedding = layers.Embedding(
-            input_dim=inputs_train["user_id"].shape[0] + 1,
-            output_dim=self.model_config.embedding_dim,
-            embeddings_regularizer="l2",
-        )(user_as_integer)
-
-        user_bias = tf.keras.layers.Embedding(
-            input_dim=inputs_train["user_id"].shape[0] + 1,
-            output_dim=1,
-            embeddings_regularizer="l2",
-        )(user_as_integer)
-
+    def create_classifier(self, vocabularies):
         # sku pipeline
-        sku_input = layers.Input(shape=(1,), name="sku_id")
+        if hasattr(self, "model"):
+            del self.model
+        sku_id_input = layers.Input(shape=(1,), name="sku_id")
         sku_as_integer = layers.IntegerLookup(vocabulary=vocabularies["sku_id"])(
-            sku_input
+            sku_id_input
         )
 
         sku_embedding = layers.Embedding(
-            input_dim=inputs_train["sku_id"].shape[0] + 1,
+            input_dim=len(vocabularies["sku_id"]) + 1,
             output_dim=self.model_config.embedding_dim,
-            embeddings_regularizer="l2",
+            # embeddings_regularizer=regularizers.L2(l2=0.02),
         )(sku_as_integer)
 
-        sku_bias = tf.keras.layers.Embedding(
-            input_dim=inputs_train["sku_id"].shape[0] + 1,
-            output_dim=1,
-            embeddings_regularizer="l2",
-        )(sku_as_integer)
+        flattened_sku_embedding = layers.Flatten()(sku_embedding)
+
+        sku_features_input = layers.Input(shape=(1,), name="sku_features")
+
+        concat_sku = layers.Concatenate(axis=1)(
+            [flattened_sku_embedding, sku_features_input]
+        )
+
+        # sku_bias = tf.keras.layers.Embedding(
+        #     input_dim=len(vocabularies["sku_id"]) + 1,
+        #     output_dim=1,
+        #     embeddings_regularizer="l2",
+        # )(sku_as_integer)
+
+        # user pipeline
+        user_id_input = layers.Input(shape=(1,), name="user_id")
+
+        user_as_integer = layers.IntegerLookup(vocabulary=vocabularies["user_id"])(
+            user_id_input
+        )
+
+        user_embedding = layers.Embedding(
+            input_dim=len(vocabularies["user_id"]) + 1,
+            output_dim=self.model_config.embedding_dim,
+            # embeddings_regularizer=regularizers.L2(l2=0.02),
+        )(user_as_integer)
+
+        flattened_user_embedding = layers.Flatten()(user_embedding)
+
+        user_features_input = layers.Input(
+            shape=(self.user_features_dim,), name="user_features"
+        )
+
+        concat_user = layers.Concatenate(axis=1)(
+            [flattened_user_embedding, user_features_input]
+        )
+
+        denser_user = layers.Dense(concat_sku.shape[1])(concat_user)
 
         if self.model_config.embedding_func == "subtract":
             # dot product
-            logger.info("Model will subtract embeddings")
-            subtracted = layers.Subtract()([user_embedding, sku_embedding])
-            added = layers.Add()([subtracted, user_bias, sku_bias])
+            logger.info("Model uses `layers.Subtract`")
+            tmp_out = layers.Subtract()([denser_user, concat_sku])
+            # added = layers.Add()([subtracted, user_bias, sku_bias])
 
-        elif self.model_config.embedding_func == "add":
+        elif self.model_config.embedding_func == "dot":
             # - original model ~LightFM
-            logger.info("Model will add embeddings")
-            dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
-            added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
+            logger.info("Model will use `layers.Dot`")
+            # dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
+            # added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
+            # tmp_out = layers.Flatten()(added)
         else:
-            raise ValueError("model_type can be either `subtract` or `add`")
-        flatten = layers.Flatten()(added)
+            raise ValueError("`embedding_func` can be either `subtract` or `dot`")
+
         # hidden0 = layers.Dense(11, activation="relu")(flatten)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
-        out = layers.Dense(5, activation="softmax")(flatten)
+        out = layers.Dense(5, kernel_regularizer="l2", activation="softmax")(tmp_out)
         # model input/output definition
-        self.model = Model(inputs=[user_input, sku_input], outputs=out)
+        self.model = Model(
+            inputs=[
+                user_id_input,
+                user_features_input,
+                sku_id_input,
+                sku_features_input,
+            ],
+            outputs=out,
+        )
 
     def compile_model(self):
         self.model.compile(
@@ -291,7 +320,7 @@ class Trainer:
                 monitor="val_loss",
                 patience=10,
                 verbose=2,
-                restore_best_weights=True,
+                restore_best_weights=self.model_config.early_stopping__restore_best_weights,
             )
             logger.info(
                 f"Adding EarlyStopping callback with parameters: {early_stopping_kwargs}"
@@ -331,64 +360,73 @@ class Trainer:
                 )
             )
 
-    def fit(self, Xs_train, y_train):
+    def fit(self, inputs_dict, targets_train, embedding_vocabs, validation_data=None):
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
 
+        self.create_classifier(embedding_vocabs)
+
+        self.compile_model()
+        self.create_call_backs()
+
+        if validation_data is not None:
+            validation_split = None
+        else:
+            validation_split = self.model_config.validation_split
+
         results = self.model.fit(
-            Xs_train,
-            y_train,
+            inputs_dict,
+            targets_train,
             epochs=self.model_config.epochs,
             batch_size=self.model_config.batch_size,
-            validation_split=self.model_config.validation_split,
+            validation_split=validation_split,
+            validation_data=validation_data,
             verbose=self.model_config.fit_verbose,
             callbacks=self.model_callbacks,
         )
         return results
 
-    def fit_with_cross_validation(self, inputs_train, targets_train, n_splits=5):
+    def fit_with_cross_validation(
+        self, inputs_dict, targets_train, embedding_vocabs, n_splits
+    ):
         results = []
 
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=321)
+        labels_train = self.target_pipe.inverse_transform(targets_train)
         for idx, (train_idx, val_idx) in enumerate(
-            skf.split(inputs_train["user_id"], inputs_train["sku_id"], targets_train)
+            skf.split(labels_train, labels_train)
         ):
-            logger.info(f"Split #{idx + 1}")
-            _Xs_train = [
-                inputs_train["user_id"][train_idx, :],
-                inputs_train["sku_id"][train_idx, :],
-            ]
-            _y_train = targets_train.iloc[train_idx, :]
+            inputs_train_fold = {
+                key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
+            }
+            targets_train_fold = targets_train[train_idx, :]
 
-            _Xs_val = [
-                inputs_train["user_id"][val_idx, :],
-                inputs_train["sku_id"][val_idx, :],
-            ]
-            _y_val = targets_train.iloc[val_idx, :]
+            inputs_val_fold = {
+                key: df.iloc[val_idx, :] for key, df in inputs_dict.items()
+            }
+
+            targets_val_fold = targets_train[val_idx, :]
             tf.keras.backend.clear_session()
             tf.random.set_seed(345)
-
-            _results = self.model.fit(
-                _Xs_train,
-                _y_train,
-                epochs=self.model_config.epochs,
-                batch_size=self.model_config.batch_size,
-                validation_data=(_Xs_val, _y_val),
-                verbose=self.model_config.fit_verbose,
-                callbacks=self.model_callbacks,
+            _results = self.fit(
+                inputs_train_fold,
+                targets_train_fold,
+                embedding_vocabs,
+                validation_data=(inputs_val_fold, targets_val_fold),
             )
+            logger.info(f"Model trained on split #{idx + 1}")
             results.append(_results)
         return results
 
     def evaluate_model(self, df_test):
-        inputs_test, _ = self.get_embedding_inputs(df_test)
+        inputs_test, _ = self.get_inputs_dict(df_test)
         targets_test = self.get_targets(df_test)
         logger.info("evaluating model")
         self.model.evaluate(inputs_test, targets_test)
 
     def append_predictions(self, df_test):
-        inputs_test, _ = self.get_embedding_inputs(df_test)
+        inputs_test, _ = self.get_inputs_dict(df_test)
         pred_test = self.model.predict(inputs_test)
         y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
         df_test["predicted_rating"] = y_pred
@@ -397,6 +435,8 @@ class Trainer:
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
+        training_color = np.array([0, 0, 0])
+        loss_color = np.array([1, 0, 0])
         if not (isinstance(results, list)):
             results = [results]
         _, ax = plt.subplots(1, figsize=(7, 7))
@@ -405,14 +445,17 @@ class Trainer:
             ax.plot(
                 these_results.history[plot_key],
                 label=f"{plot_key} / {idx + 1}",
-                color="k",
+                color=training_color,
             )
             ax.plot(
                 these_results.history[f"val_{plot_key}"],
                 "-",
                 label=f"val_{plot_key} / {idx + 1}",
-                color="r",
+                color=loss_color,
             )
+
+            training_color = 1 - ((1 - training_color) * 0.8)
+            loss_color = 1 - ((1 - loss_color) * 0.8)
         ax.set_xlabel("Epoch")
         plt.legend()
         plt.grid(True)
@@ -420,20 +463,23 @@ class Trainer:
         return ax
 
     @staticmethod
-    def plot_confusion_matrix(df_dict, fig_height=5):
+    def plot_confusion_matrix(df_dict, fig_height=5, query_str=None):
         n_df = len(df_dict)
         fig, axs = plt.subplots(1, n_df, figsize=(fig_height * n_df, fig_height))
         if not (isinstance(axs, np.ndarray)):
             axs = [axs]
         for ax, (name, df) in zip(axs, df_dict.items()):
-
+            if query_str is not None:
+                _df = df.query(query_str)
+            else:
+                _df = df
             cm = confusion_matrix(
-                df["predicted_rating"].astype(int), df["rating"].astype(int)
+                _df["rating"].astype(int), _df["predicted_rating"].astype(int)
             )
             ax = sns.heatmap(cm, annot=True, fmt="d", ax=ax)
-            ax.set_xlabel("Actual Rating")
+            ax.set_xlabel("Predicted Rating")
             ax.set_xticklabels(range(1, 6))
-            ax.set_ylabel("Predicted Rating")
+            ax.set_ylabel("Actual Rating")
             ax.set_yticklabels(range(1, 6))
             ax.invert_yaxis()
             ax.set_title(name)
@@ -444,8 +490,12 @@ class Trainer:
 if __name__ == "__main__":
     model_config = ModelConfig(
         fit_verbose=0,
+        learning_rate=0.00005,
+        epochs=10,
         classification_loss="categorical_crossentropy",
         embedding_func="subtract",
+        embedding_dim=3,
+        batch_size=128,
     )
     trainer = Trainer(model_config)
     # load data
@@ -455,13 +505,19 @@ if __name__ == "__main__":
     df_train, df_test = trainer.get_split_training_set()
     trainer.fit_pipelines(df_train)
     #
-    inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
+    # embedding_inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
+    # user_features_inputs_train = trainer.get_user_features_inputs(df_train)
+    inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
     # initialize and train model
-    trainer.create_classifier(inputs_train, vocabularies)
+    # trainer.create_classifier(embedding_vocabs)
+
+    # trainer.compile_model()
+    # trainer.create_call_backs()
+    # results = trainer.fit(inputs_train, targets_train, embedding_vocabs)
 
     # trainer.create_dummy_classifier(targets_train)
-    trainer.compile_model()
-    trainer.create_call_backs()
-    results = trainer.fit_with_cross_validation(inputs_train, targets_train, n_splits=3)
-    # trainer.evaluate_model(df_test)
+    results = trainer.fit_with_cross_validation(
+        inputs_train, targets_train, embedding_vocabs, n_splits=3
+    )
+    trainer.evaluate_model(df_test)
