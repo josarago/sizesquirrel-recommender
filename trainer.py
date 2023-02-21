@@ -386,7 +386,10 @@ class Trainer:
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
-        self.create_classifier(embedding_vocabs)
+        if self.model_config.model_type == "classifier":
+            self.create_classifier(embedding_vocabs)
+        elif self.model_config.model_type == "regressor":
+            self.create_regressor(embedding_vocabs)
 
         self.compile_model()
         self.create_call_backs()
@@ -516,6 +519,7 @@ class Trainer:
 
 if __name__ == "__main__":
     model_config = ModelConfig(
+        model_type="regressor",
         fit_verbose=0,
         learning_rate=0.00005,
         epochs=1_000,
