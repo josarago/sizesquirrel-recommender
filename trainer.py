@@ -4,7 +4,6 @@ import datetime
 import sqlite3 as db
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -31,26 +30,9 @@ from pipelines import (
 )
 from query import QUERY
 
-from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD
+from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD, ModelConfig
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class ModelConfig:
-    test_size: float = 0.3
-    embedding_dim: int = 4
-    learning_rate: float = 0.005
-    batch_size: int = 256
-    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
-    validation_split: float = 0.2
-    epochs: int = 2_000
-    fit_verbose: int = 1
-    asym_loss_gamma: float = 0.5
-    classification_loss: str = "categorical_crossentropy"
-    embedding_func: str = "subtract"
-    early_stopping__patience: int = 50
-    early_stopping__restore_best_weights: bool = True
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -73,9 +55,9 @@ class Trainer:
     _query = QUERY
     _db_file_path = DB_FILE_PATH
     embedding_pipe = embedding_pipe
-    target_pipe = target_pipe
     user_features_pipe = user_features_pipe
     sku_features_pipe = sku_features_pipe
+    target_pipe = target_pipe
     _embedding_columns = EMBEDDING_COLUMNS
     _target_column = TARGET_COLUMN
 
@@ -174,7 +156,7 @@ class Trainer:
         self.embedding_pipe.fit(df_train)
         self.user_features_pipe.fit(df_train)
         self.sku_features_pipe.fit(df_train)
-        self.target_pipe.fit(df_train[self._target_column])
+        self.target_pipe.fit(df_train[[self.target_columns]])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
@@ -194,7 +176,7 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df[self._target_column])
+        y = self.target_pipe.transform(df[[self.target_columns]])
         return y
 
     def get_inputs_dict(self, df):
@@ -306,9 +288,9 @@ class Trainer:
         self.model.compile(
             loss=self.model_config.classification_loss,
             metrics=[
-                "categorical_crossentropy",
+                "sparse_categorical_crossentropy",
                 "kullback_leibler_divergence",
-                "categorical_accuracy",
+                "sparse_categorical_accuracy",
             ],
             optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
         )
@@ -516,10 +498,11 @@ class Trainer:
 
 if __name__ == "__main__":
     model_config = ModelConfig(
+        model_type="classifier",
         fit_verbose=0,
         learning_rate=0.00005,
         epochs=1_000,
-        classification_loss="categorical_crossentropy",
+        classification_loss="sparse_categorical_crossentropy",
         embedding_func="subtract",
         embedding_dim=3,
         batch_size=1024,
