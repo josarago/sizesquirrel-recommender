@@ -30,25 +30,15 @@ from pipelines import (
 )
 from query import QUERY
 
-from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD, ModelConfig
+from config import (
+    get_logger,
+    DB_FILE_PATH,
+    US_EURO_SIZE_THRESHOLD,
+    ClassifierConfig,
+    RegressorConfig,
+)
 
 logger = get_logger(__name__)
-
-
-class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
-    def __init__(self, gamma=0.5):
-        super().__init__()
-        self._gamma = gamma
-
-    def call(self, y_true, y_pred):
-        """
-        if alpha = 0.5 this is equivalent to the MSE Loss
-        """
-        asym_factor = tf.abs(
-            tf.constant(self._gamma)
-            - tf.cast(tf.math.greater(y_pred, y_true), tf.float32)
-        )
-        return tf.reduce_mean(asym_factor * tf.math.square(y_pred - y_true), axis=-1)
 
 
 class Trainer:
@@ -61,7 +51,7 @@ class Trainer:
     _embedding_columns = EMBEDDING_COLUMNS
     _target_column = TARGET_COLUMN
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, model_config):
         self.model_config = model_config
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
@@ -136,6 +126,7 @@ class Trainer:
             self.convert_shoe_size_to_inches
         )
         self.user_sku_df["sku_id"] = self.compute_sku_id(self.user_sku_df)
+        self.user_sku_df["rating"] = self.user_sku_df["rating"].astype(float)
 
     def get_split_training_set(
         self, test_size=None, stratify_split=True, chronological_split=False
@@ -176,7 +167,9 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df[[self.target_columns]])
+        y = self.target_pipe.transform(df[self.target_columns])
+        if self.model_config.model_type == "regressor":
+            return y.astype(float)
         return y
 
     def get_inputs_dict(self, df):
@@ -198,7 +191,7 @@ class Trainer:
         out = layers.Lambda(constant_output)(user_input)
         self.model = Model(inputs=[user_input], outputs=out)
 
-    def create_classifier(self, vocabularies):
+    def create_model(self, vocabularies):
         # sku pipeline
         if hasattr(self, "model"):
             del self.model
@@ -272,7 +265,9 @@ class Trainer:
         hidden = layers.Dense(11, activation="relu")(tmp_out)
         dropout = layers.Dropout(0.5)(tmp_out)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
-        out = layers.Dense(5, kernel_regularizer="l2", activation="softmax")(dropout)
+        out = layers.Dense(
+            5, kernel_regularizer="l2", activation=self.model_config.output_activation
+        )(dropout)
         # model input/output definition
         self.model = Model(
             inputs=[
@@ -285,18 +280,12 @@ class Trainer:
         )
 
     def compile_model(self):
+
         self.model.compile(
-            loss=self.model_config.classification_loss,
-            metrics=[
-                "sparse_categorical_crossentropy",
-                "kullback_leibler_divergence",
-                "sparse_categorical_accuracy",
-            ],
+            loss=self.model_config.loss,
+            metrics=self.model_config.tracked_metrics,
             optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
         )
-
-    def load_model(self, inputs_train, vocabularies):
-        self.create_classifier(inputs_train, vocabularies)
 
     def create_call_backs(
         self,
@@ -368,8 +357,7 @@ class Trainer:
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
-        self.create_classifier(embedding_vocabs)
-
+        self.create_model(embedding_vocabs)
         self.compile_model()
         self.create_call_backs()
 
@@ -401,9 +389,8 @@ class Trainer:
         results = []
 
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=321)
-        labels_train = self.target_pipe.inverse_transform(targets_train)
         for idx, (train_idx, val_idx) in enumerate(
-            skf.split(labels_train, labels_train)
+            skf.split(targets_train, targets_train)
         ):
             inputs_train_fold = {
                 key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
@@ -497,13 +484,10 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    model_config = ModelConfig(
-        model_type="classifier",
+    model_config = RegressorConfig(
         fit_verbose=0,
         learning_rate=0.00005,
         epochs=1_000,
-        classification_loss="sparse_categorical_crossentropy",
-        embedding_func="subtract",
         embedding_dim=3,
         batch_size=1024,
     )
