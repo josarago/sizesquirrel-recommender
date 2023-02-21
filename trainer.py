@@ -19,6 +19,7 @@ import tensorflow as tf
 
 from tensorflow.keras import layers, regularizers
 from tensorflow.keras.models import Model
+import keras_tuner as kt
 
 from pipelines import (
     EMBEDDING_COLUMNS,
@@ -45,12 +46,12 @@ class ModelConfig:
     checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
     validation_split: float = 0.2
     epochs: int = 2_000
-    fit_verbose: int = 1
+    fit_verbose: int = 0
     asym_loss_gamma: float = 0.5
     classification_loss: str = "categorical_crossentropy"
     embedding_func: str = "subtract"
     early_stopping__patience: int = 50
-    early_stopping__restore_best_weights: bool = True
+    early_stopping__restore_best_weights: bool = False
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -86,6 +87,8 @@ class Trainer:
         self._cursor = self._conn.cursor()
         self.user_sku_df: pd.DataFrame = None
         self.model_callbacks = []
+        self.embedding_vocabs = None
+        self.tuner: kt.RandomSearch = None
 
     @property
     def embedding_columns(self):
@@ -203,6 +206,7 @@ class Trainer:
         inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
         self.user_features_dim = inputs_dict["user_features"].shape[1]
         self.sku_features_dim = inputs_dict["sku_features"].shape[1]
+        self.embedding_vocabs = embedding_vocabs
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
@@ -216,18 +220,19 @@ class Trainer:
         out = layers.Lambda(constant_output)(user_input)
         self.model = Model(inputs=[user_input], outputs=out)
 
-    def create_classifier(self, vocabularies):
+    def create_classifier(self, hp):
         # sku pipeline
+        hp_embedding_dim = hp.Int("embedding_dim", min_value=3, max_value=8, step=1)
         if hasattr(self, "model"):
-            del self.model
+            del model
         sku_id_input = layers.Input(shape=(1,), name="sku_id")
-        sku_as_integer = layers.IntegerLookup(vocabulary=vocabularies["sku_id"])(
-            sku_id_input
-        )
+        sku_as_integer = layers.IntegerLookup(
+            vocabulary=self.embedding_vocabs["sku_id"]
+        )(sku_id_input)
 
         sku_embedding = layers.Embedding(
-            input_dim=len(vocabularies["sku_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
+            input_dim=len(self.embedding_vocabs["sku_id"]) + 1,
+            output_dim=hp_embedding_dim,
             # embeddings_regularizer=regularizers.L2(l2=0.02),
         )(sku_as_integer)
 
@@ -241,22 +246,16 @@ class Trainer:
             [flattened_sku_embedding, sku_features_input]
         )
 
-        # sku_bias = tf.keras.layers.Embedding(
-        #     input_dim=len(vocabularies["sku_id"]) + 1,
-        #     output_dim=1,
-        #     embeddings_regularizer="l2",
-        # )(sku_as_integer)
-
         # user pipeline
         user_id_input = layers.Input(shape=(1,), name="user_id")
 
-        user_as_integer = layers.IntegerLookup(vocabulary=vocabularies["user_id"])(
-            user_id_input
-        )
+        user_as_integer = layers.IntegerLookup(
+            vocabulary=self.embedding_vocabs["user_id"]
+        )(user_id_input)
 
         user_embedding = layers.Embedding(
-            input_dim=len(vocabularies["user_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
+            input_dim=len(self.embedding_vocabs["user_id"]) + 1,
+            output_dim=hp_embedding_dim,
             # embeddings_regularizer=regularizers.L2(l2=0.02),
         )(user_as_integer)
 
@@ -287,12 +286,16 @@ class Trainer:
         else:
             raise ValueError("`embedding_func` can be either `subtract` or `dot`")
 
-        hidden = layers.Dense(11, activation="relu")(tmp_out)
-        dropout = layers.Dropout(0.5)(tmp_out)
+        hp_hidden_layer_dim = hp.Int(
+            "hidden_layer_dim", min_value=4, max_value=10, step=2
+        )
+        hidden = layers.Dense(hp_hidden_layer_dim, activation="relu")(tmp_out)
+        hp_dropout_rate = hp.Choice("dropout_rate", values=[0.4, 0.5, 0.6, 0.7])
+        dropout = layers.Dropout(hp_dropout_rate)(hidden)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
         out = layers.Dense(5, kernel_regularizer="l2", activation="softmax")(dropout)
         # model input/output definition
-        self.model = Model(
+        model = Model(
             inputs=[
                 user_id_input,
                 user_features_input,
@@ -302,16 +305,30 @@ class Trainer:
             outputs=out,
         )
 
-    def compile_model(self):
-        self.model.compile(
+        hp_learning_rate = hp.Float(
+            "learning_rate", 1e-5, 1e-1, sampling="log", default=1e-3
+        )
+        model.compile(
             loss=self.model_config.classification_loss,
             metrics=[
                 "categorical_crossentropy",
                 "kullback_leibler_divergence",
                 "categorical_accuracy",
             ],
-            optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
+            optimizer=tf.optimizers.Adam(learning_rate=hp_learning_rate),
         )
+        return model
+
+    # def compile_model(self):
+    #     self.model.compile(
+    #         loss=self.model_config.classification_loss,
+    #         metrics=[
+    #             "categorical_crossentropy",
+    #             "kullback_leibler_divergence",
+    #             "categorical_accuracy",
+    #         ],
+    #         optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
+    #     )
 
     def load_model(self, inputs_train, vocabularies):
         self.create_classifier(inputs_train, vocabularies)
@@ -386,7 +403,7 @@ class Trainer:
 
         tf.keras.backend.clear_session()
         tf.random.set_seed(123)
-        self.create_classifier(embedding_vocabs)
+        self.create_classifier()
 
         self.compile_model()
         self.create_call_backs()
@@ -407,6 +424,27 @@ class Trainer:
             class_weight=class_weight,
         )
         return results
+
+    def initialize_tuner(self):
+        self.tuner = kt.RandomSearch(
+            self.create_classifier,
+            objective="categorical_crossentropy",
+            max_trials=100,
+            seed=10101010,
+            directory="tuner",
+            project_name="sizesquirrel-recommender",
+        )
+        logger.info("Hyperband tuner created")
+
+    def search(self, inputs_train, targets_train):
+        self.tuner.search(
+            inputs_train,
+            targets_train,
+            validation_split=0.2,
+            callbacks=[self.model_callbacks],
+            verbose=1,
+        )
+        self.model = self.tuner.get_best_models(num_models=1)
 
     def fit_with_cross_validation(
         self,
@@ -537,11 +575,14 @@ if __name__ == "__main__":
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
 
-    results = trainer.fit(
-        inputs_train,
-        targets_train,
-        embedding_vocabs,
-        class_weight=None,
-    )
+    trainer.initialize_tuner()
+    trainer.create_call_backs()
+    trainer.search(inputs_train, targets_train)
+    # results = trainer.fit(
+    #     inputs_train,
+    #     targets_train,
+    #     embedding_vocabs,
+    #     class_weight=None,
+    # )
 
-    trainer.evaluate_model(df_test)
+    # trainer.evaluate_model(df_test)

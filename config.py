@@ -37,7 +37,7 @@ class ModelConfig:
     checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
     validation_split: float = 0.2
     epochs: int = 2_000
-    fit_verbose: int = 1
+    fit_verbose: int = 0
     asym_loss_gamma: float = 0.5
     classification_loss: str = "categorical_crossentropy"
     embedding_func: str = "subtract"
