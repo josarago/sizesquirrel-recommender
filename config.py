@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 import logging
 
 # logging
@@ -14,6 +15,23 @@ def get_logger(name):
     )
     logger = logging.getLogger(name)
     return logger
+
+
+@dataclass
+class ModelConfig:
+    test_size: float = 0.3
+    embedding_dim: int = 4
+    learning_rate: float = 0.005
+    batch_size: int = 256
+    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
+    validation_split: float = 0.2
+    epochs: int = 2_000
+    fit_verbose: int = 1
+    asym_loss_gamma: float = 0.5
+    classification_loss: str = "categorical_crossentropy"
+    embedding_func: str = "subtract"
+    early_stopping__patience: int = 50
+    early_stopping__restore_best_weights: bool = True
 
 
 # trainer data config

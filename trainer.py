@@ -1,10 +1,8 @@
-import os
-
 import datetime
 import sqlite3 as db
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
+
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -31,26 +29,9 @@ from pipelines import (
 )
 from query import QUERY
 
-from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD
+from config import get_logger, DB_FILE_PATH, US_EURO_SIZE_THRESHOLD, ModelConfig
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class ModelConfig:
-    test_size: float = 0.3
-    embedding_dim: int = 4
-    learning_rate: float = 0.005
-    batch_size: int = 256
-    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
-    validation_split: float = 0.2
-    epochs: int = 2_000
-    fit_verbose: int = 1
-    asym_loss_gamma: float = 0.5
-    classification_loss: str = "categorical_crossentropy"
-    embedding_func: str = "subtract"
-    early_stopping__patience: int = 50
-    early_stopping__restore_best_weights: bool = True
 
 
 class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
@@ -462,27 +443,25 @@ class Trainer:
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
-        training_color = np.array([0, 0, 0])
-        loss_color = np.array([1, 0, 0])
         if not (isinstance(results, list)):
             results = [results]
         _, ax = plt.subplots(1, figsize=(7, 7))
         for idx, these_results in enumerate(results):
 
-            ax.plot(
+            line_objs = ax.plot(
                 these_results.history[plot_key],
                 label=f"{plot_key} / {idx + 1}",
-                color=training_color,
+                linestyle="--",
             )
+
+            color = line_objs[-1].get_color()
             ax.plot(
                 these_results.history[f"val_{plot_key}"],
                 "-",
                 label=f"val_{plot_key} / {idx + 1}",
-                color=loss_color,
+                linestyle="-",
+                color=color,
             )
-
-            training_color = 1 - ((1 - training_color) * 0.8)
-            loss_color = 1 - ((1 - loss_color) * 0.8)
         ax.set_xlabel("Epoch")
         plt.legend()
         plt.grid(True)
