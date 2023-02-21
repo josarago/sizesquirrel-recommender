@@ -10,6 +10,7 @@ select user_item.id
     , user.climbing_trad as trad_climbing
 --    , item.asin    
     , brand.name as brand_name
+    , brand.id as brand_id
     , item.model
     , gender.name as shoe_gender
     , user_item.size as size
