@@ -2,7 +2,7 @@ from sklearn.preprocessing import (
     OrdinalEncoder,
     FunctionTransformer,
     OneHotEncoder,
-    LabelBinarizer,
+    LabelEncoder,
     StandardScaler,
 )
 from sklearn.impute import SimpleImputer
@@ -113,4 +113,4 @@ USED_COLUMNS = (
     + [TARGET_COLUMN]
 )
 
-target_pipe = LabelBinarizer()
+target_pipe = LabelEncoder()
