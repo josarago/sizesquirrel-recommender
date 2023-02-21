@@ -1,6 +1,8 @@
 import os
 from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
+import tensorflow as tf
 
 # logging
 LOGGING_FORMAT = "%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s"
@@ -43,3 +45,68 @@ US_EURO_SIZE_THRESHOLD = 25
 # SizeManager config
 SIZING_DIR_NAME = "sizing_systems"
 SIZING_SYSTEM_DIR_PATH = os.path.join(DATA_DIR_PATH, SIZING_DIR_NAME)
+
+
+class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
+    def __init__(self, gamma=0.5):
+        super().__init__()
+        self._gamma = gamma
+
+    def call(self, y_true, y_pred):
+        """
+        if alpha = 0.5 this is equivalent to the MSE Loss
+        """
+        asym_factor = tf.abs(
+            tf.constant(self._gamma)
+            - tf.cast(tf.math.greater(y_pred, y_true), tf.float32)
+        )
+        return tf.reduce_mean(asym_factor * tf.math.square(y_pred - y_true), axis=-1)
+
+
+@dataclass
+class ClassifierConfig:
+    test_size: float = 0.3
+    embedding_dim: int = 4
+    learning_rate: float = 0.005
+    batch_size: int = 256
+    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
+    validation_split: float = 0.2
+    epochs: int = 2_000
+    fit_verbose: int = 1
+    embedding_func: str = "subtract"
+    early_stopping__patience: int = 50
+    early_stopping__restore_best_weights: bool = False
+    # model_type specific
+    model_type: str = "classifier"
+    loss = "sparse_categorical_crossentropy"
+    output_activation = "softmax"
+    tracked_metrics = [
+        "sparse_categorical_crossentropy",
+        "kullback_leibler_divergence",
+        "sparse_categorical_accuracy",
+    ]
+
+
+@dataclass
+class RegressorConfig:
+    test_size: float = 0.3
+    embedding_dim: int = 4
+    learning_rate: float = 0.005
+    batch_size: int = 256
+    checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
+    validation_split: float = 0.2
+    epochs: int = 2_000
+    fit_verbose: int = 1
+    embedding_func: str = "subtract"
+    early_stopping__patience: int = 50
+    early_stopping__restore_best_weights: bool = False
+    # model_type specific
+    model_type: str = "regressor"
+    loss = AsymmetricsMeanSquaredError(0.5)
+    output_activation = "linear"
+    tracked_metrics = [
+        "mean_absolute_error",
+        tf.keras.metrics.RootMeanSquaredError(
+            name="root_mean_squared_error", dtype=None
+        ),
+    ]
