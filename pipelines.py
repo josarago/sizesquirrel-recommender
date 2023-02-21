@@ -106,11 +106,4 @@ sku_features_pipe = FeatureUnion(
     ]
 )
 
-USED_COLUMNS = (
-    EMBEDDING_COLUMNS
-    + USER_CATEGORICAL_COLUMNS
-    + SKU_NUMERICAL_COLUMNS
-    + [TARGET_COLUMN]
-)
-
 target_pipe = LabelBinarizer()
