@@ -66,6 +66,7 @@ class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
 
 @dataclass
 class ClassifierConfig:
+    target_pipe = classifier_target_pipe
     test_size: float = 0.3
     embedding_dim: int = 4
     learning_rate: float = 0.005
