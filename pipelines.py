@@ -1,7 +1,6 @@
 from sklearn.preprocessing import (
     OrdinalEncoder,
     FunctionTransformer,
-    OneHotEncoder,
     LabelEncoder,
     StandardScaler,
 )
@@ -95,4 +94,5 @@ sku_features_pipe = FeatureUnion(
 )
 
 
-target_pipe = LabelEncoder()
+classifier_target_pipe = LabelEncoder()
+regressor_target_pipe = FunctionTransformer(lambda x: x)

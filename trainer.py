@@ -1,3 +1,4 @@
+from typing import Union
 import datetime
 import sqlite3 as db
 import numpy as np
@@ -14,7 +15,7 @@ from sklearn.utils.class_weight import compute_class_weight
 
 import tensorflow as tf
 
-from tensorflow.keras import layers, regularizers
+from tensorflow.keras import layers
 from tensorflow.keras.models import Model
 
 from pipelines import (
@@ -22,7 +23,6 @@ from pipelines import (
     TARGET_CATEGORIES,
     TARGET_COLUMN,
     embedding_pipe,
-    target_pipe,
     user_features_pipe,
     sku_features_pipe,
 )
@@ -45,11 +45,10 @@ class Trainer:
     embedding_pipe = embedding_pipe
     user_features_pipe = user_features_pipe
     sku_features_pipe = sku_features_pipe
-    target_pipe = target_pipe
     _embedding_columns = EMBEDDING_COLUMNS["user"] + EMBEDDING_COLUMNS["sku"]
     _target_column = TARGET_COLUMN
 
-    def __init__(self, model_config):
+    def __init__(self, model_config: Union[ClassifierConfig, RegressorConfig]):
         self.model_config = model_config
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
@@ -149,7 +148,7 @@ class Trainer:
         logger.info("fitting `sku_features_pipe`")
         self.sku_features_pipe.fit(df_train)
         logger.info("fitting `target_pipe`")
-        self.target_pipe.fit(df_train[self.target_columns])
+        self.model_config.target_pipe.fit(df_train[self.target_columns])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
@@ -169,7 +168,7 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df[self.target_columns])
+        y = self.model_config.target_pipe.transform(df[self.target_columns])
         if self.model_config.model_type == "regressor":
             return y.astype(float)
         return y
@@ -270,44 +269,6 @@ class Trainer:
             [processed, user_pooled_bias, sku_pooled_bias]
         )
         flatten = tf.keras.layers.Flatten(name="flatten")(add)
-
-        # sku_features_input = layers.Input(
-        #     shape=(self.sku_features_dim,), name="sku_features"
-        # )
-
-        # user_features_input = layers.Input(
-        #     shape=(self.user_features_dim,), name="user_features"
-        # )
-
-        # concat_sku = layers.Concatenate(axis=1)(
-        #     [flattened_sku_embedding, sku_features_input]
-        # )
-
-        # sku_bias = tf.keras.layers.Embedding(
-        #     input_dim=len(vocabularies["sku_id"]) + 1,
-        #     output_dim=1,
-        #     embeddings_regularizer="l2",
-        # )(sku_as_integer)
-
-        # user pipeline
-        # if self.model_config.embedding_func == "subtract":
-        #     # dot product
-        #     logger.info("Model uses `layers.Subtract`")
-        #     tmp_out = layers.Subtract()([denser_user, concat_sku])
-        #     # added = layers.Add()([subtracted, user_bias, sku_bias])
-
-        # elif self.model_config.embedding_func == "dot":
-        #     # - original model ~LightFM
-        #     logger.info("Model will use `layers.Dot`")
-        #     # dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
-        #     # added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
-        #     # tmp_out = layers.Flatten()(added)
-        # else:
-        #     raise ValueError("`embedding_func` can be either `subtract` or `dot`")
-
-        # hidden = layers.Dense(11, activation="relu")(tmp_out)
-        # dropout = layers.Dropout(0.5)(tmp_out)
-        # hidden0 = layers.Dense(7, activation="relu")(flatten)
         n_out = 1 if self.model_config.model_type == "regressor" else 5
         out = layers.Dense(
             n_out,
@@ -465,10 +426,16 @@ class Trainer:
     def append_predictions(self, df_test):
         inputs_test, _ = self.get_inputs_dict(df_test)
         pred_test = self.model.predict(inputs_test)
-        y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
-        df_test["predicted_rating"] = y_pred
-        rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
-        df_test[rating_proba_columns] = pred_test
+        if self.model_config.model_type == "classifier":
+            y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
+            df_test["predicted_rating"] = y_pred
+            rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
+            df_test[rating_proba_columns] = pred_test
+        else:
+            df_test["predicted_rating"] = pred_test
+            df_test["rounded_predicted_rating"] = df_test["predicted_rating"].apply(
+                np.round
+            )
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
@@ -486,7 +453,6 @@ class Trainer:
             color = line_objs[-1].get_color()
             ax.plot(
                 these_results.history[f"val_{plot_key}"],
-                "-",
                 label=f"val_{plot_key} / {idx + 1}",
                 linestyle="-",
                 color=color,
@@ -549,4 +515,8 @@ if __name__ == "__main__":
         embedding_vocabs,
         class_weight=None,
     )
+
+    # results = trainer.fit_with_cross_validation(
+    #     inputs_train, targets_train, embedding_vocabs, n_splits=5
+    # )
     trainer.evaluate_model(df_test)
