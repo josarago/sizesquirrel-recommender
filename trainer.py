@@ -1,5 +1,4 @@
-import os
-
+from typing import Union
 import datetime
 import sqlite3 as db
 import numpy as np
@@ -24,7 +23,6 @@ from pipelines import (
     TARGET_CATEGORIES,
     TARGET_COLUMN,
     embedding_pipe,
-    target_pipe,
     user_features_pipe,
     sku_features_pipe,
 )
@@ -47,11 +45,10 @@ class Trainer:
     embedding_pipe = embedding_pipe
     user_features_pipe = user_features_pipe
     sku_features_pipe = sku_features_pipe
-    target_pipe = target_pipe
-    _embedding_columns = EMBEDDING_COLUMNS
+    _embedding_columns = EMBEDDING_COLUMNS["user"] + EMBEDDING_COLUMNS["sku"]
     _target_column = TARGET_COLUMN
 
-    def __init__(self, model_config):
+    def __init__(self, model_config: Union[ClassifierConfig, RegressorConfig]):
         self.model_config = model_config
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
@@ -64,7 +61,7 @@ class Trainer:
         return self._embedding_columns
 
     @property
-    def target_columns(self):
+    def target_column(self):
         return self._target_column
 
     def load_data(self):
@@ -144,10 +141,14 @@ class Trainer:
 
     def fit_pipelines(self, df_train):
         # features
+        logger.info("fitting `embedding_pipe`")
         self.embedding_pipe.fit(df_train)
+        logger.info("fitting `user_features_pipe`")
         self.user_features_pipe.fit(df_train)
+        logger.info("fitting `sku_features_pipe`")
         self.sku_features_pipe.fit(df_train)
-        self.target_pipe.fit(df_train[[self.target_columns]])
+        logger.info("fitting `target_pipe`")
+        self.model_config.target_pipe.fit(df_train[self.target_column])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
@@ -167,7 +168,7 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.target_pipe.transform(df[self.target_columns])
+        y = self.model_config.target_pipe.transform(df[self.target_column])
         if self.model_config.model_type == "regressor":
             return y.astype(float)
         return y
@@ -181,6 +182,10 @@ class Trainer:
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
+        # broken
+        pass
+
+    def create_dummy_regressor(self, targets_train):
         mean_proba = targets_train.mean().T.reshape(1, -1)
 
         def constant_output(x):
@@ -189,93 +194,118 @@ class Trainer:
 
         user_input = layers.Input(shape=(1,), name="user_id")
         out = layers.Lambda(constant_output)(user_input)
+        logger.info("Dummy regressor created: always predicting the mean value")
         self.model = Model(inputs=[user_input], outputs=out)
 
     def create_model(self, vocabularies):
         # sku pipeline
         if hasattr(self, "model"):
             del self.model
-        sku_id_input = layers.Input(shape=(1,), name="sku_id")
-        sku_as_integer = layers.IntegerLookup(vocabulary=vocabularies["sku_id"])(
-            sku_id_input
-        )
 
-        sku_embedding = layers.Embedding(
-            input_dim=len(vocabularies["sku_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
-            # embeddings_regularizer=regularizers.L2(l2=0.02),
-        )(sku_as_integer)
+        # embedding and their biases
+        model_inputs = dict()
+        as_integer = dict()
+        embeddings = dict()
+        biases = dict()
 
-        flattened_sku_embedding = layers.Flatten()(sku_embedding)
+        for name, vocabulary in vocabularies.items():
+            model_inputs[name] = layers.Input(shape=(1,), name=name)
+            as_integer[name] = layers.IntegerLookup(vocabulary=vocabulary)(
+                model_inputs[name]
+            )
+            embeddings[name] = layers.Embedding(
+                input_dim=len(vocabulary) + 1,
+                output_dim=self.model_config.embedding_dim,
+                embeddings_regularizer=regularizers.L2(l2=0.02),
+            )(as_integer[name])
 
-        sku_features_input = layers.Input(
-            shape=(self.sku_features_dim,), name="sku_features"
-        )
+            biases[name] = layers.Embedding(
+                input_dim=len(vocabulary) + 1,
+                output_dim=1,
+                # embeddings_regularizer=regularizers.L2(l2=0.02),
+            )(as_integer[name])
 
-        concat_sku = layers.Concatenate(axis=1)(
-            [flattened_sku_embedding, sku_features_input]
-        )
-
-        # sku_bias = tf.keras.layers.Embedding(
-        #     input_dim=len(vocabularies["sku_id"]) + 1,
-        #     output_dim=1,
-        #     embeddings_regularizer="l2",
-        # )(sku_as_integer)
-
-        # user pipeline
-        user_id_input = layers.Input(shape=(1,), name="user_id")
-
-        user_as_integer = layers.IntegerLookup(vocabulary=vocabularies["user_id"])(
-            user_id_input
-        )
-
-        user_embedding = layers.Embedding(
-            input_dim=len(vocabularies["user_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
-            # embeddings_regularizer=regularizers.L2(l2=0.02),
-        )(user_as_integer)
-
-        flattened_user_embedding = layers.Flatten()(user_embedding)
-
-        user_features_input = layers.Input(
+        # user and sku features
+        model_inputs["user_features"] = layers.Input(
             shape=(self.user_features_dim,), name="user_features"
         )
 
-        concat_user = layers.Concatenate(axis=1)(
-            [flattened_user_embedding, user_features_input]
+        reshaped_user_features = layers.Dense(self.model_config.embedding_dim)(
+            model_inputs["user_features"]
         )
 
-        denser_user = layers.Dense(concat_sku.shape[1])(concat_user)
+        # we sum all user embeddings
+        user_pooled_embedding = layers.Add()(
+            [
+                layer
+                for name, layer in embeddings.items()
+                if name in EMBEDDING_COLUMNS["user"]
+            ]
+            + [reshaped_user_features]
+        )
 
-        if self.model_config.embedding_func == "subtract":
-            # dot product
-            logger.info("Model uses `layers.Subtract`")
-            tmp_out = layers.Subtract()([denser_user, concat_sku])
-            # added = layers.Add()([subtracted, user_bias, sku_bias])
+        user_pooled_bias = layers.Add()(
+            [
+                layer
+                for name, layer in biases.items()
+                if name in EMBEDDING_COLUMNS["user"]
+            ]
+        )
 
-        elif self.model_config.embedding_func == "dot":
-            # - original model ~LightFM
-            logger.info("Model will use `layers.Dot`")
-            # dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
-            # added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
-            # tmp_out = layers.Flatten()(added)
-        else:
-            raise ValueError("`embedding_func` can be either `subtract` or `dot`")
+        # user and sku features
+        model_inputs["sku_features"] = layers.Input(
+            shape=(self.sku_features_dim,), name="sku_features"
+        )
 
-        hidden = layers.Dense(11, activation="relu")(tmp_out)
-        dropout = layers.Dropout(0.5)(tmp_out)
-        # hidden0 = layers.Dense(7, activation="relu")(flatten)
+        reshaped_sku_features = layers.Dense(self.model_config.embedding_dim)(
+            model_inputs["sku_features"]
+        )
+
+        sku_pooled_embedding = layers.Add()(
+            [
+                layer
+                for name, layer in embeddings.items()
+                if name in EMBEDDING_COLUMNS["sku"]
+            ]
+            + [reshaped_sku_features]
+        )
+
+        sku_pooled_bias = layers.Add()(
+            [
+                layer
+                for name, layer in biases.items()
+                if name in EMBEDDING_COLUMNS["sku"]
+            ]
+        )
+
+        if self.model_config.embedding_func == "dot":
+            processed = layers.Dot(axes=2, name="dot")(
+                [user_pooled_embedding, sku_pooled_embedding]
+            )
+            logger.info("Using `Dot` layers to `combine` embedding layers")
+        elif self.model_config.embedding_func == "subtract":
+            processed = layers.Subtract()([user_pooled_embedding, sku_pooled_embedding])
+            logger.info("Using `Subtract` layers to `combine` embedding layers")
+        add = layers.Add(name="add_pooled_embeddings_and_biases")(
+            [processed, user_pooled_bias, sku_pooled_bias]
+        )
+        flatten = layers.Flatten(name="flatten")(add)
+        hidden = layers.Dense(
+            3,
+            activation="relu",
+            kernel_regularizer="l2",
+            name="hidden",
+        )(flatten)
+        n_out = 1 if self.model_config.model_type == "regressor" else 5
         out = layers.Dense(
-            5, kernel_regularizer="l2", activation=self.model_config.output_activation
-        )(dropout)
+            n_out,
+            # bias_regularizer="l2",
+            activation=self.model_config.output_activation,
+            name="output",
+        )(hidden)
         # model input/output definition
         self.model = Model(
-            inputs=[
-                user_id_input,
-                user_features_input,
-                sku_id_input,
-                sku_features_input,
-            ],
+            inputs=model_inputs,
             outputs=out,
         )
 
@@ -395,13 +425,13 @@ class Trainer:
             inputs_train_fold = {
                 key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
             }
-            targets_train_fold = targets_train[train_idx, :]
+            targets_train_fold = targets_train[train_idx]
 
             inputs_val_fold = {
                 key: df.iloc[val_idx, :] for key, df in inputs_dict.items()
             }
 
-            targets_val_fold = targets_train[val_idx, :]
+            targets_val_fold = targets_train[val_idx]
             tf.keras.backend.clear_session()
             tf.random.set_seed(345)
             _results = self.fit(
@@ -424,34 +454,37 @@ class Trainer:
     def append_predictions(self, df_test):
         inputs_test, _ = self.get_inputs_dict(df_test)
         pred_test = self.model.predict(inputs_test)
-        y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
-        df_test["predicted_rating"] = y_pred
-        rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
-        df_test[rating_proba_columns] = pred_test
+        if self.model_config.model_type == "classifier":
+            y_pred = np.apply_along_axis(lambda x: np.argmax(x) + 1, 1, pred_test)
+            df_test["predicted_rating"] = y_pred
+            rating_proba_columns = [f"proba_rating_{n}" for n in range(1, 6)]
+            df_test[rating_proba_columns] = pred_test
+        else:
+            df_test["predicted_rating"] = pred_test
+            df_test["rounded_predicted_rating"] = df_test["predicted_rating"].apply(
+                np.round
+            )
         return df_test
 
     def plot_results(self, results, plot_key="loss"):
-        training_color = np.array([0, 0, 0])
-        loss_color = np.array([1, 0, 0])
         if not (isinstance(results, list)):
             results = [results]
         _, ax = plt.subplots(1, figsize=(7, 7))
         for idx, these_results in enumerate(results):
 
-            ax.plot(
+            line_objs = ax.plot(
                 these_results.history[plot_key],
                 label=f"{plot_key} / {idx + 1}",
-                color=training_color,
-            )
-            ax.plot(
-                these_results.history[f"val_{plot_key}"],
-                "-",
-                label=f"val_{plot_key} / {idx + 1}",
-                color=loss_color,
+                linestyle="--",
             )
 
-            training_color = 1 - ((1 - training_color) * 0.8)
-            loss_color = 1 - ((1 - loss_color) * 0.8)
+            color = line_objs[-1].get_color()
+            ax.plot(
+                these_results.history[f"val_{plot_key}"],
+                label=f"val_{plot_key} / {idx + 1}",
+                linestyle="-",
+                color=color,
+            )
         ax.set_xlabel("Epoch")
         plt.legend()
         plt.grid(True)
@@ -486,29 +519,36 @@ class Trainer:
 if __name__ == "__main__":
     model_config = RegressorConfig(
         fit_verbose=0,
-        learning_rate=0.00005,
+        learning_rate=0.0001,
         epochs=1_000,
-        embedding_dim=3,
+        embedding_dim=8,
         batch_size=1024,
+        embedding_func="subtract",
     )
     trainer = Trainer(model_config)
     # load data
     trainer.load_data()
     trainer.transform_data()
-    # df_features, df_targets = trainer.get_training_set()
     df_train, df_test = trainer.get_split_training_set()
     trainer.fit_pipelines(df_train)
-    #
-    # embedding_inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
-    # user_features_inputs_train = trainer.get_user_features_inputs(df_train)
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
+    # dummy regressor
+    # trainer.create_dummy_regressor(targets_train)
+    # trainer.compile_model()
+    # trainer.create_call_backs()
+    # results = trainer.fit(
+    #     inputs_train,
+    #     targets_train,
+    #     embedding_vocabs,
+    #     class_weight=None,
+    # )
 
-    results = trainer.fit(
+    results = trainer.fit_with_cross_validation(
         inputs_train,
         targets_train,
         embedding_vocabs,
+        n_splits=3,
         class_weight=None,
     )
-
     trainer.evaluate_model(df_test)

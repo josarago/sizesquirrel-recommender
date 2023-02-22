@@ -7,19 +7,22 @@ We want to build a model able to recommend the best fitting size for a given pai
 ### User features
 
 - `user_id`
-- foot shape (categorical)
+- street shoe size (US or EURO)
 - gender
+- foot shape (categorical)
 - number of years:
 	- bouldering
 	- sport climbing
 	- trad climbing
-- street shoe size (US or EURO)
+
 
 ### Item features
+- `sku_id`?
 - brand
 - model
 - gender
 - size (US or EURO)
+- item type
 
 ### Target variable
 Rating (between 1 and 5) for a given pair of user and sku (brand + model + gender + size)

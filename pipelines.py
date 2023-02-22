@@ -1,7 +1,6 @@
 from sklearn.preprocessing import (
     OrdinalEncoder,
     FunctionTransformer,
-    OneHotEncoder,
     LabelEncoder,
     StandardScaler,
 )
@@ -13,13 +12,30 @@ from sklearn import set_config
 
 set_config(transform_output="pandas")
 
-EMBEDDING_COLUMNS = ["user_id", "sku_id"]
 TARGET_CATEGORIES = [1, 2, 3, 4, 5]
 TARGET_COLUMN = "rating"
+EMBEDDING_COLUMNS = dict()
+
+EMBEDDING_COLUMNS["user"] = [
+    "user_id",
+    "user_gender",
+    "user_foot_shape",
+]
+
+EMBEDDING_COLUMNS["sku"] = [
+    "brand_id",
+    "model",
+    "shoe_gender",
+    "size",
+    "item_type",
+]
 
 embedding_pipe = Pipeline(
     steps=[
-        ("embedding_columns", ColumnSelector(EMBEDDING_COLUMNS)),
+        (
+            "embedding_columns",
+            ColumnSelector(EMBEDDING_COLUMNS["user"] + EMBEDDING_COLUMNS["sku"]),
+        ),
         (
             "ordinal_encoder",
             OrdinalEncoder(
@@ -37,38 +53,29 @@ SIZE_IN_SCALE = 15
 
 user_street_shoe_size_in_pipe = Pipeline(
     steps=[
-        ("user_street_shoe_size_in", ColumnSelector("street_shoe_size_in")),
+        ("user_street_shoe_size_in", ColumnSelector("user_street_shoe_size_in")),
         ("imputer", SimpleImputer(fill_value=-SIZE_IN_SCALE)),
         ("scale", FunctionTransformer(lambda x: x / SIZE_IN_SCALE)),
     ]
 )
 
-USER_CATEGORICAL_COLUMNS = ["user_gender", "user_foot_shape"]
 
-user_categorical_pipe = Pipeline(
+CLIMBING_YEAR_IN_STYLE_COLUMNS = ["bouldering", "sport_climbing", "trad_climbing"]
+
+climbing_years_in_style_pipe = Pipeline(
     steps=[
-        ("user_categories", ColumnSelector(USER_CATEGORICAL_COLUMNS)),
-        ("one_hot", OneHotEncoder(drop="first", sparse_output=False)),
+        ("column_selector", ColumnSelector(CLIMBING_YEAR_IN_STYLE_COLUMNS)),
+        ("scaler", StandardScaler()),
     ]
 )
 
 user_features_pipe = FeatureUnion(
     [
         ("user_street_shoe_size", user_street_shoe_size_in_pipe),
-        ("user_categorical", user_categorical_pipe),
+        ("climbing_year_in_style", climbing_years_in_style_pipe),
     ]
 )
-# - categorical
-#     - gender
-#     - climbing_<style>
-#     - foot shape
 
-# item features:
-# - numerical
-#    - size_in (stored in user_item)
-# - categorical
-#     - gender_id
-#     - type
 
 SKU_NUMERICAL_COLUMNS = ["size_in"]
 
@@ -80,37 +87,12 @@ shoe_size_in_pipe = Pipeline(
     ]
 )
 
-CLIMBING_YEAR_IN_STYLE_COLUMNS = ["bouldering", "sport_climbing", "trad_climbing"]
-
-climbing_years_in_style_pipe = Pipeline(
-    steps=[
-        ("column_selector", ColumnSelector(CLIMBING_YEAR_IN_STYLE_COLUMNS)),
-        ("scaler", StandardScaler()),
-    ]
-)
-
-ITEM_TYPE_COLUMNS = ["item_type"]
-
-item_type_pipe = Pipeline(
-    steps=[
-        ("column_selector", ColumnSelector(ITEM_TYPE_COLUMNS)),
-        ("one_hot", OneHotEncoder(drop="first", sparse_output=False)),
-    ]
-)
-
 sku_features_pipe = FeatureUnion(
     [
         ("shoe_size", shoe_size_in_pipe),
-        ("climbing_year_in_style", climbing_years_in_style_pipe),
-        ("item_type", item_type_pipe),
     ]
 )
 
-USED_COLUMNS = (
-    EMBEDDING_COLUMNS
-    + USER_CATEGORICAL_COLUMNS
-    + SKU_NUMERICAL_COLUMNS
-    + [TARGET_COLUMN]
-)
 
-target_pipe = LabelEncoder()
+classifier_target_pipe = LabelEncoder()
+regressor_target_pipe = FunctionTransformer(lambda x: x.values)
