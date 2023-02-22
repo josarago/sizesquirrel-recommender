@@ -183,6 +183,10 @@ class Trainer:
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
+        # broken
+        pass
+
+    def create_dummy_regressor(self, targets_train):
         mean_proba = targets_train.mean().T.reshape(1, -1)
 
         def constant_output(x):
@@ -191,6 +195,7 @@ class Trainer:
 
         user_input = layers.Input(shape=(1,), name="user_id")
         out = layers.Lambda(constant_output)(user_input)
+        logger.info("Dummy regressor created: always predicting the mean value")
         self.model = Model(inputs=[user_input], outputs=out)
 
     def create_model(self, vocabularies):
@@ -251,12 +256,18 @@ class Trainer:
                 if name in EMBEDDING_COLUMNS["sku"]
             ]
         )
-
-        dot = tf.keras.layers.Dot(axes=2, name="dot")(
-            [user_pooled_embedding, sku_pooled_embedding]
-        )
+        if self.model_config.embedding_func == "dot":
+            processed = tf.keras.layers.Dot(axes=2, name="dot")(
+                [user_pooled_embedding, sku_pooled_embedding]
+            )
+            logger.info("Using `Dot` layers to `combine` embedding layers")
+        elif self.model_config.embedding_func == "subtract":
+            processed = tf.keras.layers.Subtract()(
+                [user_pooled_embedding, sku_pooled_embedding]
+            )
+            logger.info("Using `Subtract` layers to `combine` embedding layers")
         add = tf.keras.layers.Add(name="add_pooled_embeddings_and_biases")(
-            [dot, user_pooled_bias, sku_pooled_bias]
+            [processed, user_pooled_bias, sku_pooled_bias]
         )
         flatten = tf.keras.layers.Flatten(name="flatten")(add)
 
@@ -297,8 +308,11 @@ class Trainer:
         # hidden = layers.Dense(11, activation="relu")(tmp_out)
         # dropout = layers.Dropout(0.5)(tmp_out)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
+        n_out = 1 if self.model_config.model_type == "regressor" else 5
         out = layers.Dense(
-            5, kernel_regularizer="l2", activation=self.model_config.output_activation
+            n_out,
+            # kernel_regularizer="l2",
+            activation=self.model_config.output_activation,
         )(flatten)
         # model input/output definition
         self.model = Model(
@@ -511,29 +525,28 @@ class Trainer:
 if __name__ == "__main__":
     model_config = RegressorConfig(
         fit_verbose=0,
-        learning_rate=0.00005,
+        learning_rate=0.05,
         epochs=1_000,
-        embedding_dim=3,
+        embedding_dim=5,
         batch_size=1024,
+        embedding_func="subtract",
     )
     trainer = Trainer(model_config)
     # load data
     trainer.load_data()
     trainer.transform_data()
-    # df_features, df_targets = trainer.get_training_set()
     df_train, df_test = trainer.get_split_training_set()
     trainer.fit_pipelines(df_train)
-    #
-    # embedding_inputs_train, vocabularies = trainer.get_embedding_inputs(df_train)
-    # user_features_inputs_train = trainer.get_user_features_inputs(df_train)
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
-    # trainer.create_model(embedding_vocabs)
+    # dummy regressor
+    # trainer.create_dummy_regressor(targets_train)
+    # trainer.compile_model()
+    # trainer.create_call_backs()
     results = trainer.fit(
         inputs_train,
         targets_train,
         embedding_vocabs,
         class_weight=None,
     )
-    # print("something")
     trainer.evaluate_model(df_test)

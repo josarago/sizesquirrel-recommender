@@ -90,14 +90,14 @@ class ClassifierConfig:
 @dataclass
 class RegressorConfig:
     test_size: float = 0.3
-    embedding_dim: int = 4
+    embedding_dim: int = 5
     learning_rate: float = 0.005
     batch_size: int = 256
     checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
     validation_split: float = 0.2
     epochs: int = 2_000
     fit_verbose: int = 1
-    embedding_func: str = "subtract"
+    embedding_func: str = "dot"
     early_stopping__patience: int = 50
     early_stopping__restore_best_weights: bool = False
     # model_type specific
