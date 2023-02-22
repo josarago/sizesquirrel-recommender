@@ -46,7 +46,7 @@ class Trainer:
     user_features_pipe = user_features_pipe
     sku_features_pipe = sku_features_pipe
     target_pipe = target_pipe
-    _embedding_columns = EMBEDDING_COLUMNS
+    _embedding_columns = EMBEDDING_COLUMNS["user"] + EMBEDDING_COLUMNS["sku"]
     _target_column = TARGET_COLUMN
 
     def __init__(self, model_config):
@@ -142,10 +142,14 @@ class Trainer:
 
     def fit_pipelines(self, df_train):
         # features
+        logger.info("fitting `embedding_pipe`")
         self.embedding_pipe.fit(df_train)
+        logger.info("fitting `user_features_pipe`")
         self.user_features_pipe.fit(df_train)
+        logger.info("fitting `sku_features_pipe`")
         self.sku_features_pipe.fit(df_train)
-        self.target_pipe.fit(df_train[[self.target_columns]])
+        logger.info("fitting `target_pipe`")
+        self.target_pipe.fit(df_train[self.target_columns])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
@@ -172,10 +176,10 @@ class Trainer:
 
     def get_inputs_dict(self, df):
         inputs_dict, embedding_vocabs = self.get_embedding_inputs(df)
-        inputs_dict["user_features"] = self.get_user_features_inputs(df)
-        inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
-        self.user_features_dim = inputs_dict["user_features"].shape[1]
-        self.sku_features_dim = inputs_dict["sku_features"].shape[1]
+        # inputs_dict["user_features"] = self.get_user_features_inputs(df)
+        # inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
+        # self.user_features_dim = inputs_dict["user_features"].shape[1]
+        # self.sku_features_dim = inputs_dict["sku_features"].shape[1]
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
@@ -193,26 +197,80 @@ class Trainer:
         # sku pipeline
         if hasattr(self, "model"):
             del self.model
-        sku_id_input = layers.Input(shape=(1,), name="sku_id")
-        sku_as_integer = layers.IntegerLookup(vocabulary=vocabularies["sku_id"])(
-            sku_id_input
+        model_inputs = dict()
+        as_integer = dict()
+        embeddings = dict()
+        biases = dict()
+
+        for name, vocabulary in vocabularies.items():
+            model_inputs[name] = layers.Input(shape=(1,), name=name)
+            as_integer[name] = layers.IntegerLookup(vocabulary=vocabulary)(
+                model_inputs[name]
+            )
+            embeddings[name] = layers.Embedding(
+                input_dim=len(vocabulary) + 1,
+                output_dim=self.model_config.embedding_dim,
+                # embeddings_regularizer=regularizers.L2(l2=0.02),
+            )(as_integer[name])
+
+            biases[name] = layers.Embedding(
+                input_dim=len(vocabulary) + 1,
+                output_dim=1,
+                # embeddings_regularizer=regularizers.L2(l2=0.02),
+            )(as_integer[name])
+
+        # we sum all user embeddings
+        user_pooled_embedding = tf.keras.layers.Add()(
+            [
+                layer
+                for name, layer in embeddings.items()
+                if name in EMBEDDING_COLUMNS["user"]
+            ]
         )
 
-        sku_embedding = layers.Embedding(
-            input_dim=len(vocabularies["sku_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
-            # embeddings_regularizer=regularizers.L2(l2=0.02),
-        )(sku_as_integer)
-
-        flattened_sku_embedding = layers.Flatten()(sku_embedding)
-
-        sku_features_input = layers.Input(
-            shape=(self.sku_features_dim,), name="sku_features"
+        user_pooled_bias = tf.keras.layers.Add()(
+            [
+                layer
+                for name, layer in biases.items()
+                if name in EMBEDDING_COLUMNS["user"]
+            ]
         )
 
-        concat_sku = layers.Concatenate(axis=1)(
-            [flattened_sku_embedding, sku_features_input]
+        sku_pooled_embedding = tf.keras.layers.Add()(
+            [
+                layer
+                for name, layer in embeddings.items()
+                if name in EMBEDDING_COLUMNS["sku"]
+            ]
         )
+
+        sku_pooled_bias = tf.keras.layers.Add()(
+            [
+                layer
+                for name, layer in biases.items()
+                if name in EMBEDDING_COLUMNS["sku"]
+            ]
+        )
+
+        dot = tf.keras.layers.Dot(axes=2, name="dot")(
+            [user_pooled_embedding, sku_pooled_embedding]
+        )
+        add = tf.keras.layers.Add(name="add_pooled_embeddings_and_biases")(
+            [dot, user_pooled_bias, sku_pooled_bias]
+        )
+        flatten = tf.keras.layers.Flatten(name="flatten")(add)
+
+        # sku_features_input = layers.Input(
+        #     shape=(self.sku_features_dim,), name="sku_features"
+        # )
+
+        # user_features_input = layers.Input(
+        #     shape=(self.user_features_dim,), name="user_features"
+        # )
+
+        # concat_sku = layers.Concatenate(axis=1)(
+        #     [flattened_sku_embedding, sku_features_input]
+        # )
 
         # sku_bias = tf.keras.layers.Embedding(
         #     input_dim=len(vocabularies["sku_id"]) + 1,
@@ -221,59 +279,30 @@ class Trainer:
         # )(sku_as_integer)
 
         # user pipeline
-        user_id_input = layers.Input(shape=(1,), name="user_id")
+        # if self.model_config.embedding_func == "subtract":
+        #     # dot product
+        #     logger.info("Model uses `layers.Subtract`")
+        #     tmp_out = layers.Subtract()([denser_user, concat_sku])
+        #     # added = layers.Add()([subtracted, user_bias, sku_bias])
 
-        user_as_integer = layers.IntegerLookup(vocabulary=vocabularies["user_id"])(
-            user_id_input
-        )
+        # elif self.model_config.embedding_func == "dot":
+        #     # - original model ~LightFM
+        #     logger.info("Model will use `layers.Dot`")
+        #     # dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
+        #     # added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
+        #     # tmp_out = layers.Flatten()(added)
+        # else:
+        #     raise ValueError("`embedding_func` can be either `subtract` or `dot`")
 
-        user_embedding = layers.Embedding(
-            input_dim=len(vocabularies["user_id"]) + 1,
-            output_dim=self.model_config.embedding_dim,
-            # embeddings_regularizer=regularizers.L2(l2=0.02),
-        )(user_as_integer)
-
-        flattened_user_embedding = layers.Flatten()(user_embedding)
-
-        user_features_input = layers.Input(
-            shape=(self.user_features_dim,), name="user_features"
-        )
-
-        concat_user = layers.Concatenate(axis=1)(
-            [flattened_user_embedding, user_features_input]
-        )
-
-        denser_user = layers.Dense(concat_sku.shape[1])(concat_user)
-
-        if self.model_config.embedding_func == "subtract":
-            # dot product
-            logger.info("Model uses `layers.Subtract`")
-            tmp_out = layers.Subtract()([denser_user, concat_sku])
-            # added = layers.Add()([subtracted, user_bias, sku_bias])
-
-        elif self.model_config.embedding_func == "dot":
-            # - original model ~LightFM
-            logger.info("Model will use `layers.Dot`")
-            # dot = layers.Dot(axes=2)([user_embedding, sku_embedding])
-            # added = tf.keras.layers.Add()([dot, user_bias, sku_bias])
-            # tmp_out = layers.Flatten()(added)
-        else:
-            raise ValueError("`embedding_func` can be either `subtract` or `dot`")
-
-        hidden = layers.Dense(11, activation="relu")(tmp_out)
-        dropout = layers.Dropout(0.5)(tmp_out)
+        # hidden = layers.Dense(11, activation="relu")(tmp_out)
+        # dropout = layers.Dropout(0.5)(tmp_out)
         # hidden0 = layers.Dense(7, activation="relu")(flatten)
         out = layers.Dense(
             5, kernel_regularizer="l2", activation=self.model_config.output_activation
-        )(dropout)
+        )(flatten)
         # model input/output definition
         self.model = Model(
-            inputs=[
-                user_id_input,
-                user_features_input,
-                sku_id_input,
-                sku_features_input,
-            ],
+            inputs=model_inputs,
             outputs=out,
         )
 
@@ -499,12 +528,12 @@ if __name__ == "__main__":
     # user_features_inputs_train = trainer.get_user_features_inputs(df_train)
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
-
+    # trainer.create_model(embedding_vocabs)
     results = trainer.fit(
         inputs_train,
         targets_train,
         embedding_vocabs,
         class_weight=None,
     )
-
+    # print("something")
     trainer.evaluate_model(df_test)
