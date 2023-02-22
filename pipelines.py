@@ -95,4 +95,4 @@ sku_features_pipe = FeatureUnion(
 
 
 classifier_target_pipe = LabelEncoder()
-regressor_target_pipe = FunctionTransformer(lambda x: x)
+regressor_target_pipe = FunctionTransformer(lambda x: x.values)

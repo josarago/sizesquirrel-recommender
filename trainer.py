@@ -15,7 +15,7 @@ from sklearn.utils.class_weight import compute_class_weight
 
 import tensorflow as tf
 
-from tensorflow.keras import layers
+from tensorflow.keras import layers, regularizers
 from tensorflow.keras.models import Model
 
 from pipelines import (
@@ -61,7 +61,7 @@ class Trainer:
         return self._embedding_columns
 
     @property
-    def target_columns(self):
+    def target_column(self):
         return self._target_column
 
     def load_data(self):
@@ -148,7 +148,7 @@ class Trainer:
         logger.info("fitting `sku_features_pipe`")
         self.sku_features_pipe.fit(df_train)
         logger.info("fitting `target_pipe`")
-        self.model_config.target_pipe.fit(df_train[self.target_columns])
+        self.model_config.target_pipe.fit(df_train[self.target_column])
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
@@ -168,17 +168,17 @@ class Trainer:
         return sku_features_inputs
 
     def get_targets(self, df):
-        y = self.model_config.target_pipe.transform(df[self.target_columns])
+        y = self.model_config.target_pipe.transform(df[self.target_column])
         if self.model_config.model_type == "regressor":
             return y.astype(float)
         return y
 
     def get_inputs_dict(self, df):
         inputs_dict, embedding_vocabs = self.get_embedding_inputs(df)
-        # inputs_dict["user_features"] = self.get_user_features_inputs(df)
-        # inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
-        # self.user_features_dim = inputs_dict["user_features"].shape[1]
-        # self.sku_features_dim = inputs_dict["sku_features"].shape[1]
+        inputs_dict["user_features"] = self.get_user_features_inputs(df)
+        inputs_dict["sku_features"] = self.get_sku_features_inputs(df)
+        self.user_features_dim = inputs_dict["user_features"].shape[1]
+        self.sku_features_dim = inputs_dict["sku_features"].shape[1]
         return inputs_dict, embedding_vocabs
 
     def create_dummy_classifier(self, targets_train):
@@ -201,6 +201,8 @@ class Trainer:
         # sku pipeline
         if hasattr(self, "model"):
             del self.model
+
+        # embedding and their biases
         model_inputs = dict()
         as_integer = dict()
         embeddings = dict()
@@ -214,7 +216,7 @@ class Trainer:
             embeddings[name] = layers.Embedding(
                 input_dim=len(vocabulary) + 1,
                 output_dim=self.model_config.embedding_dim,
-                # embeddings_regularizer=regularizers.L2(l2=0.02),
+                embeddings_regularizer=regularizers.L2(l2=0.02),
             )(as_integer[name])
 
             biases[name] = layers.Embedding(
@@ -223,16 +225,26 @@ class Trainer:
                 # embeddings_regularizer=regularizers.L2(l2=0.02),
             )(as_integer[name])
 
+        # user and sku features
+        model_inputs["user_features"] = layers.Input(
+            shape=(self.user_features_dim,), name="user_features"
+        )
+
+        reshaped_user_features = layers.Dense(self.model_config.embedding_dim)(
+            model_inputs["user_features"]
+        )
+
         # we sum all user embeddings
-        user_pooled_embedding = tf.keras.layers.Add()(
+        user_pooled_embedding = layers.Add()(
             [
                 layer
                 for name, layer in embeddings.items()
                 if name in EMBEDDING_COLUMNS["user"]
             ]
+            + [reshaped_user_features]
         )
 
-        user_pooled_bias = tf.keras.layers.Add()(
+        user_pooled_bias = layers.Add()(
             [
                 layer
                 for name, layer in biases.items()
@@ -240,41 +252,57 @@ class Trainer:
             ]
         )
 
-        sku_pooled_embedding = tf.keras.layers.Add()(
+        # user and sku features
+        model_inputs["sku_features"] = layers.Input(
+            shape=(self.sku_features_dim,), name="sku_features"
+        )
+
+        reshaped_sku_features = layers.Dense(self.model_config.embedding_dim)(
+            model_inputs["sku_features"]
+        )
+
+        sku_pooled_embedding = layers.Add()(
             [
                 layer
                 for name, layer in embeddings.items()
                 if name in EMBEDDING_COLUMNS["sku"]
             ]
+            + [reshaped_sku_features]
         )
 
-        sku_pooled_bias = tf.keras.layers.Add()(
+        sku_pooled_bias = layers.Add()(
             [
                 layer
                 for name, layer in biases.items()
                 if name in EMBEDDING_COLUMNS["sku"]
             ]
         )
+
         if self.model_config.embedding_func == "dot":
-            processed = tf.keras.layers.Dot(axes=2, name="dot")(
+            processed = layers.Dot(axes=2, name="dot")(
                 [user_pooled_embedding, sku_pooled_embedding]
             )
             logger.info("Using `Dot` layers to `combine` embedding layers")
         elif self.model_config.embedding_func == "subtract":
-            processed = tf.keras.layers.Subtract()(
-                [user_pooled_embedding, sku_pooled_embedding]
-            )
+            processed = layers.Subtract()([user_pooled_embedding, sku_pooled_embedding])
             logger.info("Using `Subtract` layers to `combine` embedding layers")
-        add = tf.keras.layers.Add(name="add_pooled_embeddings_and_biases")(
+        add = layers.Add(name="add_pooled_embeddings_and_biases")(
             [processed, user_pooled_bias, sku_pooled_bias]
         )
-        flatten = tf.keras.layers.Flatten(name="flatten")(add)
+        flatten = layers.Flatten(name="flatten")(add)
+        hidden = layers.Dense(
+            3,
+            activation="relu",
+            kernel_regularizer="l2",
+            name="hidden",
+        )(flatten)
         n_out = 1 if self.model_config.model_type == "regressor" else 5
         out = layers.Dense(
             n_out,
-            # kernel_regularizer="l2",
+            # bias_regularizer="l2",
             activation=self.model_config.output_activation,
-        )(flatten)
+            name="output",
+        )(hidden)
         # model input/output definition
         self.model = Model(
             inputs=model_inputs,
@@ -397,13 +425,13 @@ class Trainer:
             inputs_train_fold = {
                 key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
             }
-            targets_train_fold = targets_train[train_idx, :]
+            targets_train_fold = targets_train[train_idx]
 
             inputs_val_fold = {
                 key: df.iloc[val_idx, :] for key, df in inputs_dict.items()
             }
 
-            targets_val_fold = targets_train[val_idx, :]
+            targets_val_fold = targets_train[val_idx]
             tf.keras.backend.clear_session()
             tf.random.set_seed(345)
             _results = self.fit(
@@ -491,9 +519,9 @@ class Trainer:
 if __name__ == "__main__":
     model_config = RegressorConfig(
         fit_verbose=0,
-        learning_rate=0.05,
+        learning_rate=0.0001,
         epochs=1_000,
-        embedding_dim=5,
+        embedding_dim=8,
         batch_size=1024,
         embedding_func="subtract",
     )
@@ -509,14 +537,18 @@ if __name__ == "__main__":
     # trainer.create_dummy_regressor(targets_train)
     # trainer.compile_model()
     # trainer.create_call_backs()
-    results = trainer.fit(
+    # results = trainer.fit(
+    #     inputs_train,
+    #     targets_train,
+    #     embedding_vocabs,
+    #     class_weight=None,
+    # )
+
+    results = trainer.fit_with_cross_validation(
         inputs_train,
         targets_train,
         embedding_vocabs,
+        n_splits=3,
         class_weight=None,
     )
-
-    # results = trainer.fit_with_cross_validation(
-    #     inputs_train, targets_train, embedding_vocabs, n_splits=5
-    # )
     trainer.evaluate_model(df_test)
