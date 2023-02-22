@@ -2,6 +2,47 @@
 We want to build a model able to recommend the best fitting size for a given pair of user and item (brand + model + gender). We approach it as a collaborative filtering problem but, in this case, havin multiple sizes for each item complicates thinsg a little bit
 
 
+## Available features
+
+### User features
+
+- `user_id`
+- street shoe size (US or EURO)
+- gender
+- foot shape (categorical)
+- number of years:
+	- bouldering
+	- sport climbing
+	- trad climbing
+
+
+### Item features
+- `sku_id`?
+- brand
+- model
+- gender
+- size (US or EURO)
+- item type
+
+### Target variable
+Rating (between 1 and 5) for a given pair of user and sku (brand + model + gender + size)
+
+## Feature engineering
+It seems pretty natural to use embedding for `user_id`. Hopefully we can learn a useful low dimensional representation of the user that, when *combined* with a sku embedding can help oredict the rating. The intuition behind this is that if we had access to the dimensions of the user feet and the shoes, as well as some detailed information about the user fit preferences we would be able to derive a model to predict the rating. Here we hope for the model to learn these relationships.
+
+
+## Model architecture
+### Output layer
+
+Given and pair of user and sku, We want to predict the rating. To do so we can either treat this as a regression problem, predicting the value of the rating or as a multi-class classfication problem, predicting the probability for each class. It is not immediately obvious to me which method is better. The classifier offers the advantage that will have a prediction for each rating/class, possibly allowing us to estimate the confidence in the prediction while the regression model takes into account the ordinal relationship between the rating, which could make the learning task easier.
+
+
+
+
+
+
+
+
 ## Size augmentation
 
 

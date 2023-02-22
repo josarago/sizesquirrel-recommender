@@ -2,7 +2,7 @@ QUERY = """
 select user_item.id
     , user_item.user_id
     , user_item.item_id
-    , cast(user.street_shoe_size_in as float) as street_shoe_size_in
+    , cast(user.street_shoe_size_in as float) as user_street_shoe_size_in
     , user.foot_shape as user_foot_shape
     , cast(user.gender as int) as user_gender
     , user.climbing_boulder as bouldering
@@ -10,14 +10,15 @@ select user_item.id
     , user.climbing_trad as trad_climbing
 --    , item.asin    
     , brand.name as brand_name
+    , brand.id as brand_id
     , item.model
     , gender.name as shoe_gender
     , user_item.size as size
 --    , cast(user_item.size_in as float) as size_in
-    , cast(user_item.rating as int) as rating
---    , cast(user_item.fit as float) as fit
 --    , item.brand_id
     , item.type as item_type
+--    , cast(user_item.fit as float) as fit
+    , cast(user_item.rating as float) as rating
 from user_item
 left join item
     on item.id = user_item.item_id
