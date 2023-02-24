@@ -7,7 +7,6 @@ from sklearn.preprocessing import (
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklego.preprocessing import ColumnSelector
-
 from sklearn import set_config
 
 set_config(transform_output="pandas")
