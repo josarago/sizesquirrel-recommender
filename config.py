@@ -1,4 +1,5 @@
 import os
+import platform
 from dataclasses import dataclass
 import logging
 from dataclasses import dataclass
@@ -62,6 +63,15 @@ class AsymmetricsMeanSquaredError(tf.keras.losses.Loss):
             - tf.cast(tf.math.greater(y_pred, y_true), tf.float32)
         )
         return tf.reduce_mean(asym_factor * tf.math.square(y_pred - y_true), axis=-1)
+
+
+def get_default_inference_device():
+    if "arm" in platform.platform():
+        return "mps:0"
+    else:
+        if torch.cuda.is_available():
+            return "cuda:0"
+    return "cpu"
 
 
 @dataclass
