@@ -5,7 +5,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from config import RegressorConfig, ClassifierConfig
-from trainer import Trainer
 from pipelines import TARGET_CATEGORIES, EMBEDDING_COLUMNS
 
 
@@ -76,7 +75,7 @@ class RatingPredictor(nn.Module):
                     for name in inputs.keys()
                     if name in EMBEDDING_COLUMNS["user"]
                 ]
-                + [x_features_user]
+                + [x_features_user],
             ),
             dim=0,
         )
@@ -136,62 +135,3 @@ class RatingPredictor(nn.Module):
         with_biases = torch.sum(torch.stack([x_bias_user, x_bias_sku, combined]), dim=0)
         out = self.rating_scaler(with_biases)
         return out
-
-
-def train():
-    for epoch in range(n_epoch):
-        _loss_values = dict(train=[])
-
-        for X_train, y_train in train_data_loader:
-            # Compute prediction error
-            y_pred_train = self._model(X_train.to(self._training_device))
-            train_loss = self._loss_fn(y_pred_train, y_train.to(self._training_device))
-            _loss_values["train"].append(train_loss.item())
-
-            # Backpropagation
-            self._optimizer.zero_grad()
-            train_loss.backward()
-            self._optimizer.step()
-
-        self._loss_values["train"].append(np.sqrt(np.mean(_loss_values["train"])))
-        if params["with_validation"]:
-            _loss_values["val"] = []
-            self._model.eval()  # Optional when not using Model Specific layer
-            for X_val, y_val in val_data_loader:
-                # Forward Pass
-                y_pred_val = self._model(X_val)
-                # Find the Loss
-                val_loss = self._loss_fn(y_pred_val, y_val)
-                # Calculate Loss
-                _loss_values["val"].append(val_loss.item())
-        self._loss_values["val"].append(np.sqrt(np.mean(_loss_values["val"])))
-
-    print("Training Complete")
-
-
-if __name__ == "__main__":
-    model_config = RegressorConfig(
-        fit_verbose=0,
-        learning_rate=0.0001,
-        epochs=1_000,
-        embedding_dim=8,
-        batch_size=1024,
-        embedding_func="subtract",
-        early_stopping__restore_best_weights=False,
-    )
-    trainer = Trainer(model_config)
-    # load data
-    trainer.load_data()
-    trainer.transform_data()
-    df_train, df_test = trainer.get_split_training_set()
-    trainer.fit_pipelines(df_train)
-    inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
-    targets_train = trainer.get_targets(df_train)
-
-    user_features_dim = inputs_train["user_features"].shape[1]
-    sku_features_dim = inputs_train["sku_features"].shape[1]
-
-    rating_predictor = RatingPredictor(
-        7, embedding_vocabs, user_features_dim, sku_features_dim
-    )
-    print(rating_predictor(inputs_train).shape)
