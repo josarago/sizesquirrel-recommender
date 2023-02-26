@@ -157,6 +157,10 @@ cython_debug/
 # tensorflow
 **/logs/*
 
+# lightning
+**/lightning_logs/*
+
+
 #vscode
 *.code-workspace
 
