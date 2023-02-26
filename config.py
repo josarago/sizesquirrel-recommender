@@ -94,22 +94,27 @@ class RegressorConfig:
     checkpoint_path: str = os.path.join(os.getcwd(), "model_checkpoints")
     n_splits: int = 5
     max_epochs: int = 100
-    shuffle_stratified_kfold = True
-    combine_func = "dot"
+    shuffle_stratified_kfold: bool = True
+    combine_func: str = "dot"
     model_type: str = "regressor"
     loss_fn = torch.nn.MSELoss()
     device = torch.device("cpu")
-    # early_stopping__patience: int = 50
-    # early_stopping__restore_best_weights: bool = True
-    # model_type specific
 
-    # tracked_metrics = [
-    #     "mean_absolute_error",
-    #     tf.keras.metrics.RootMeanSquaredError(
-    #         name="root_mean_squared_error", dtype=None
-    #     ),
-    # ]
+
+# early_stopping__patience: int = 50
+# early_stopping__restore_best_weights: bool = True
+# model_type specific
+
+# tracked_metrics = [
+#     "mean_absolute_error",
+#     tf.keras.metrics.RootMeanSquaredError(
+#         name="root_mean_squared_error", dtype=None
+#     ),
+# ]
 
 
 if __name__ == "__main__":
-    print(RegressorConfig())
+    config = RegressorConfig()
+    for key, val in config.__dict__.items():
+        print(f"{key}: {val}")
+    print(config.device)
