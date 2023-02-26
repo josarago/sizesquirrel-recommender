@@ -95,15 +95,21 @@ class RegressorConfig:
     n_splits: int = 5
     max_epochs: int = 100
     shuffle_stratified_kfold = True
-    # early_stopping__patience: int = 50
-    # early_stopping__restore_best_weights: bool = True
-    # model_type specific
+    combine_func = "dot"
     model_type: str = "regressor"
     loss_fn = torch.nn.MSELoss()
     device = torch.device("cpu")
+    # early_stopping__patience: int = 50
+    # early_stopping__restore_best_weights: bool = True
+    # model_type specific
+
     # tracked_metrics = [
     #     "mean_absolute_error",
     #     tf.keras.metrics.RootMeanSquaredError(
     #         name="root_mean_squared_error", dtype=None
     #     ),
     # ]
+
+
+if __name__ == "__main__":
+    print(RegressorConfig())
