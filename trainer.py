@@ -248,15 +248,17 @@ class Trainer:
 
     def validate_one_epoch(self, validation_loader):
         sum_loss = 0.0
-        for batch_idx, (inputs, targets) in enumerate(validation_loader):
-            # Make predictions for this batch
-            outputs = self.model(inputs)
-            # Compute the loss
-            loss = self.model_config.loss_fn(outputs, targets)
-            # Gather data and report
-            sum_loss += loss.item()
-        epoch_mean_loss = sum_loss / (batch_idx + 1)
-        return epoch_mean_loss
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, (inputs, targets) in enumerate(validation_loader):
+                # Make predictions for this batch
+                outputs = self.model(inputs)
+                # Compute the loss
+                loss = self.model_config.loss_fn(outputs, targets)
+                # Gather data and report
+                sum_loss += loss.item()
+            epoch_mean_loss = sum_loss / (batch_idx + 1)
+            return epoch_mean_loss
 
     def fit_with_cross_validation(
         self,
@@ -393,11 +395,11 @@ class Trainer:
 
 if __name__ == "__main__":
     model_config = RegressorConfig(
-        learning_rate=0.0001,
+        learning_rate=0.05,
         max_epochs=100,
-        embedding_dim=5,
+        embedding_dim=7,
         batch_size=512,
-        # embedding_func="subtract",
+        combine_func="dot",
     )
     trainer = Trainer(model_config)
     # load data
