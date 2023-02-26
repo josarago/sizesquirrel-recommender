@@ -138,7 +138,8 @@ class RatingPredictor(nn.Module):
             # create a tensor fo size (batch_size, 1)
             combined = torch.mul(x_embed_user, x_embed_sku).sum(dim=1)
         elif self.combine_func == "subtract":
-            # create a tensor fo size (batch_size, 1, embedding_dim)
+            subtracted = torch.subtract(x_embed_user, x_embed_sku).sum(dim=1)
+            combined = torch.square(subtracted).sum(dim=1)
             raise ValueError("fix dimensions")
             # combined = torch.subtract(x_embed_user, x_embed_sku)
         else:
