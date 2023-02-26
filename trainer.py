@@ -1,4 +1,5 @@
-from typing import Union
+from typing import Any
+from tqdm import tqdm
 import datetime
 import sqlite3 as db
 import numpy as np
@@ -12,9 +13,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.class_weight import compute_class_weight
 
-
 import tensorflow as tf
 import torch
+from torch.utils.data import DataLoader
+from torch import optim
 
 from pipelines import (
     EMBEDDING_COLUMNS,
@@ -30,9 +32,11 @@ from config import (
     get_logger,
     DB_FILE_PATH,
     US_EURO_SIZE_THRESHOLD,
-    ClassifierConfig,
     RegressorConfig,
 )
+from torch_models import RatingPredictor, get_history_df
+
+from datasets import SizeSquirrelRecommenderDataset as ProjectDataset
 
 logger = get_logger(__name__)
 
@@ -46,7 +50,7 @@ class Trainer:
     _embedding_columns = EMBEDDING_COLUMNS["user"] + EMBEDDING_COLUMNS["sku"]
     _target_column = TARGET_COLUMN
 
-    def __init__(self, model_config: Union[ClassifierConfig, RegressorConfig]):
+    def __init__(self, model_config: RegressorConfig):
         self.model_config = model_config
         logger.info(f"Creating trainer with ModelConfig: {self.model_config}")
         self._conn: db.Connection = db.connect(self._db_file_path)
@@ -150,7 +154,10 @@ class Trainer:
 
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
-        embedding_inputs = {col: embedding_df[[col]] for col in self.embedding_columns}
+        embedding_inputs = {
+            col: torch.tensor(embedding_df[col].values).view(-1, 1)
+            for col in self.embedding_columns
+        }
         embedding_vocabs = {
             col: embedding_df[col].unique() for col in self.embedding_columns
         }
@@ -158,18 +165,18 @@ class Trainer:
         return embedding_inputs, embedding_vocabs
 
     def get_user_features_inputs(self, df):
-        user_features_inputs = self.user_features_pipe.transform(df)
+        user_features_inputs = torch.tensor(
+            self.user_features_pipe.transform(df).values
+        )
         return user_features_inputs
 
     def get_sku_features_inputs(self, df):
-        sku_features_inputs = self.sku_features_pipe.transform(df)
+        sku_features_inputs = torch.tensor(self.sku_features_pipe.transform(df).values)
         return sku_features_inputs
 
     def get_targets(self, df):
         y = self.model_config.target_pipe.transform(df[self.target_column])
-        if self.model_config.model_type == "regressor":
-            return y.astype(float)
-        return y
+        return torch.tensor(y)
 
     def get_inputs_dict(self, df):
         inputs_dict, embedding_vocabs = self.get_embedding_inputs(df)
@@ -188,300 +195,14 @@ class Trainer:
 
         def constant_output(x):
             batch_size = tf.shape(x)[0]
-            return tf.tile(tf.constant(mean_proba, dtype=tf.float32), [batch_size, 1])
+            return tf.tile(
+                tf.constant(mean_proba, dtype=torch.float32), [batch_size, 1]
+            )
 
         user_input = tf.keras.layers.Input(shape=(1,), name="user_id")
         out = tf.keras.layers.Lambda(constant_output)(user_input)
         logger.info("Dummy regressor created: always predicting the mean value")
         self.model = tf.keras.Model(inputs=[user_input], outputs=out)
-
-    def create_tf_model(self, vocabularies):
-        # sku pipeline
-        if hasattr(self, "model"):
-            del self.model
-
-        # embedding and their biases
-        model_inputs = dict()
-        as_integer = dict()
-        embeddings = dict()
-        biases = dict()
-
-        for name, vocabulary in vocabularies.items():
-            model_inputs[name] = tf.keras.layers.Input(shape=(1,), name=name)
-            # as_integer[name] = tf.keras.layers.IntegerLookup(vocabulary=vocabulary)(
-            #     model_inputs[name]
-            # )
-            embeddings[name] = tf.keras.layers.Embedding(
-                input_dim=len(vocabulary) + 1,
-                output_dim=self.model_config.embedding_dim,
-                embeddings_regularizer=tf.keras.regularizers.L2(l2=0.02),
-            )(model_inputs[name])
-
-            biases[name] = tf.keras.layers.Embedding(
-                input_dim=len(vocabulary) + 1,
-                output_dim=1,
-                # embeddings_regularizer=tf.keras.regularizers.L2(l2=0.02),
-            )(as_integer[name])
-
-        # user and sku features
-        model_inputs["user_features"] = tf.keras.layers.Input(
-            shape=(self.user_features_dim,), name="user_features"
-        )
-
-        reshaped_user_features = tf.keras.layers.Dense(self.model_config.embedding_dim)(
-            model_inputs["user_features"]
-        )
-
-        # we sum all user embeddings
-        user_pooled_embedding = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in embeddings.items()
-                if name in EMBEDDING_COLUMNS["user"]
-            ]
-            + [reshaped_user_features]
-        )
-
-        user_pooled_bias = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in biases.items()
-                if name in EMBEDDING_COLUMNS["user"]
-            ]
-        )
-
-        # user and sku features
-        model_inputs["sku_features"] = tf.keras.layers.Input(
-            shape=(self.sku_features_dim,), name="sku_features"
-        )
-
-        reshaped_sku_features = tf.keras.layers.Dense(self.model_config.embedding_dim)(
-            model_inputs["sku_features"]
-        )
-
-        sku_pooled_embedding = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in embeddings.items()
-                if name in EMBEDDING_COLUMNS["sku"]
-            ]
-            + [reshaped_sku_features]
-        )
-
-        sku_pooled_bias = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in biases.items()
-                if name in EMBEDDING_COLUMNS["sku"]
-            ]
-        )
-
-        if self.model_config.embedding_func == "dot":
-            processed = tf.keras.layers.Dot(axes=2, name="dot")(
-                [user_pooled_embedding, sku_pooled_embedding]
-            )
-            logger.info("Using `Dot` layers to `combine` embedding layers")
-        elif self.model_config.embedding_func == "subtract":
-            processed = tf.keras.layers.Subtract()(
-                [user_pooled_embedding, sku_pooled_embedding]
-            )
-            logger.info("Using `Subtract` layers to `combine` embedding layers")
-        add = tf.keras.layers.Add(name="add_pooled_embeddings_and_biases")(
-            [processed, user_pooled_bias, sku_pooled_bias]
-        )
-        flatten = tf.keras.layers.Flatten(name="flatten")(add)
-        hidden = tf.keras.layers.Dense(
-            3,
-            activation="relu",
-            kernel_regularizer="l2",
-            name="hidden",
-        )(flatten)
-        n_out = 1 if self.model_config.model_type == "regressor" else 5
-        out = tf.keras.layers.Dense(
-            n_out,
-            # bias_regularizer="l2",
-            activation=self.model_config.output_activation,
-            name="output",
-        )(hidden)
-        # model input/output definition
-        self.model = tf.keras.Model(
-            inputs=model_inputs,
-            outputs=out,
-        )
-
-    def create_torch_model(self, vocabularies):
-        # sku pipeline
-        if hasattr(self, "model"):
-            del self.model
-
-        # embedding and their biases
-        model_inputs = dict()
-        as_integer = dict()
-        embeddings = dict()
-        biases = dict()
-
-        for name, vocabulary in vocabularies.items():
-            model_inputs[name] = tf.keras.layers.Input(shape=(1,), name=name)
-            as_integer[name] = tf.keras.layers.IntegerLookup(vocabulary=vocabulary)(
-                model_inputs[name]
-            )
-            embeddings[name] = tf.keras.layers.Embedding(
-                input_dim=len(vocabulary) + 1,
-                output_dim=self.model_config.embedding_dim,
-                embeddings_regularizer=tf.keras.regularizers.L2(l2=0.02),
-            )(as_integer[name])
-
-            biases[name] = tf.keras.layers.Embedding(
-                input_dim=len(vocabulary) + 1,
-                output_dim=1,
-                # embeddings_regularizer=tf.keras.regularizers.L2(l2=0.02),
-            )(as_integer[name])
-
-        # user and sku features
-        model_inputs["user_features"] = tf.keras.layers.Input(
-            shape=(self.user_features_dim,), name="user_features"
-        )
-
-        reshaped_user_features = tf.keras.layers.Dense(self.model_config.embedding_dim)(
-            model_inputs["user_features"]
-        )
-
-        # we sum all user embeddings
-        user_pooled_embedding = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in embeddings.items()
-                if name in EMBEDDING_COLUMNS["user"]
-            ]
-            + [reshaped_user_features]
-        )
-
-        user_pooled_bias = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in biases.items()
-                if name in EMBEDDING_COLUMNS["user"]
-            ]
-        )
-
-        # user and sku features
-        model_inputs["sku_features"] = tf.keras.layers.Input(
-            shape=(self.sku_features_dim,), name="sku_features"
-        )
-
-        reshaped_sku_features = tf.keras.layers.Dense(self.model_config.embedding_dim)(
-            model_inputs["sku_features"]
-        )
-
-        sku_pooled_embedding = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in embeddings.items()
-                if name in EMBEDDING_COLUMNS["sku"]
-            ]
-            + [reshaped_sku_features]
-        )
-
-        sku_pooled_bias = tf.keras.layers.Add()(
-            [
-                layer
-                for name, layer in biases.items()
-                if name in EMBEDDING_COLUMNS["sku"]
-            ]
-        )
-
-        if self.model_config.embedding_func == "dot":
-            processed = tf.keras.layers.Dot(axes=2, name="dot")(
-                [user_pooled_embedding, sku_pooled_embedding]
-            )
-            logger.info("Using `Dot` layers to `combine` embedding layers")
-        elif self.model_config.embedding_func == "subtract":
-            processed = tf.keras.layers.Subtract()(
-                [user_pooled_embedding, sku_pooled_embedding]
-            )
-            logger.info("Using `Subtract` layers to `combine` embedding layers")
-        add = tf.keras.layers.Add(name="add_pooled_embeddings_and_biases")(
-            [processed, user_pooled_bias, sku_pooled_bias]
-        )
-        flatten = tf.keras.layers.Flatten(name="flatten")(add)
-        hidden = tf.keras.layers.Dense(
-            3,
-            activation="relu",
-            kernel_regularizer="l2",
-            name="hidden",
-        )(flatten)
-        n_out = 1 if self.model_config.model_type == "regressor" else 5
-        out = tf.keras.layers.Dense(
-            n_out,
-            # bias_regularizer="l2",
-            activation=self.model_config.output_activation,
-            name="output",
-        )(hidden)
-        # model input/output definition
-        self.model = Model(
-            inputs=model_inputs,
-            outputs=out,
-        )
-
-    def compile_model(self):
-
-        self.model.compile(
-            loss=self.model_config.loss,
-            metrics=self.model_config.tracked_metrics,
-            optimizer=tf.optimizers.Adam(learning_rate=self.model_config.learning_rate),
-        )
-
-    def create_call_backs(
-        self,
-        early_stopping=True,
-        reduce_lr=False,
-        tensorboard_on=False,
-        model_checkpoint=False,
-    ):
-        if early_stopping:
-            early_stopping_kwargs = dict(
-                monitor="val_loss",
-                patience=self.model_config.early_stopping__patience,
-                verbose=2,
-                restore_best_weights=self.model_config.early_stopping__restore_best_weights,
-            )
-            logger.info(
-                f"Adding EarlyStopping callback with parameters: {early_stopping_kwargs}"
-            )
-            self.model_callbacks.append(
-                tf.keras.callbacks.EarlyStopping(**early_stopping_kwargs)
-            )
-        if reduce_lr:
-            reduce_lr_kwargs = dict(
-                monitor="val_loss",
-                factor=0.5,
-                patience=20,
-                verbose=2,
-                min_lr=self.model_config.learning_rate / 100,
-            )
-            logger.info(
-                f"Adding ReduceLROnPlateau callback with parameters: {reduce_lr_kwargs}"
-            )
-            self.model_callbacks.append(
-                tf.keras.callbacks.ReduceLROnPlateau(**reduce_lr_kwargs)
-            )
-
-        if tensorboard_on:
-            log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            self._tensorboard_callback = tf.keras.callbacks.TensorBoard(
-                log_dir=log_dir, histogram_freq=1
-            )
-            logger.info("model callbacks created")
-            self.model_callbacks.append(self._tensorboard_callback)
-
-        if model_checkpoint:
-            self.model_callbacks.append(
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=self.model_config.checkpoint_path,
-                    monitor="val_loss",
-                    save_best_only=True,
-                )
-            )
 
     @staticmethod
     def get_class_weight(df_train):
@@ -490,73 +211,113 @@ class Trainer:
         )
         return {idx: class_weight for idx, class_weight in enumerate(class_weights)}
 
-    def fit(
-        self,
-        inputs_dict,
-        targets_train,
-        embedding_vocabs,
-        validation_data=None,
-        class_weight=None,
-    ):
+    def create_torch_model(self, embedding_vocabs, user_features_dim, sku_features_dim):
 
-        tf.keras.backend.clear_session()
-        tf.random.set_seed(123)
-        self.create_tf_model(embedding_vocabs)
-        self.compile_model()
-        self.create_call_backs()
+        self.model = RatingPredictor(
+            self.model_config.embedding_dim,
+            embedding_vocabs,
+            user_features_dim,
+            sku_features_dim,
+        ).to(self.model_config.device)
+        logger.info("RatingPredictor` model created")
 
-        if validation_data is not None:
-            validation_split = None
-        else:
-            validation_split = self.model_config.validation_split
-        results = self.model.fit(
-            inputs_dict,
-            targets_train,
-            epochs=self.model_config.epochs,
-            batch_size=self.model_config.batch_size,
-            validation_split=validation_split,
-            validation_data=validation_data,
-            verbose=self.model_config.fit_verbose,
-            callbacks=self.model_callbacks,
-            class_weight=class_weight,
+        self.optimizer = optim.Adam(
+            self.model.parameters(), lr=self.model_config.learning_rate
         )
-        return results
+        logger.info(f"optimizer created")
+
+    def train_one_epoch(self, training_loader):
+        sum_loss = 0.0
+        for batch_idx, (inputs, targets) in enumerate(training_loader):
+            self.optimizer.zero_grad()
+
+            # Make predictions for this batch
+            outputs = self.model(inputs)
+
+            # Compute the loss and its gradients
+            loss = self.model_config.loss_fn(outputs, targets)
+            loss.backward()
+
+            # Adjust learning weights
+            self.optimizer.step()
+
+            # Gather data and report
+            sum_loss += loss.item()
+        epoch_mean_loss = sum_loss / (batch_idx + 1)
+        return epoch_mean_loss
+
+    def validate_one_epoch(self, validation_loader):
+        sum_loss = 0.0
+        for batch_idx, (inputs, targets) in enumerate(validation_loader):
+            # Make predictions for this batch
+            outputs = self.model(inputs)
+            # Compute the loss
+            loss = self.model_config.loss_fn(outputs, targets)
+            # Gather data and report
+            sum_loss += loss.item()
+        epoch_mean_loss = sum_loss / (batch_idx + 1)
+        return epoch_mean_loss
 
     def fit_with_cross_validation(
         self,
-        inputs_dict,
+        inputs_train,
         targets_train,
         embedding_vocabs,
-        n_splits,
-        class_weight=None,
+        n_folds,
     ):
-        results = []
+        torch.manual_seed(42)
+        user_features_dim = inputs_train["user_features"].shape[1]
+        sku_features_dim = inputs_train["sku_features"].shape[1]
 
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=321)
-        for idx, (train_idx, val_idx) in enumerate(
+        skf = StratifiedKFold(
+            n_splits=n_folds,
+            shuffle=self.model_config.shuffle_stratified_kfold,
+        )
+        logger.info(
+            f"StratifiedKFold cross-validator with {n_folds} folds created. shuffle: {self.model_config.shuffle_stratified_kfold}"
+        )
+        results = {
+            key: get_history_df(n_folds, self.model_config.max_epochs)
+            for key in ["train_loss", "val_loss"]
+        }
+        for n_fold, (train_idxs, val_idxs) in enumerate(
             skf.split(targets_train, targets_train)
         ):
-            inputs_train_fold = {
-                key: df.iloc[train_idx, :] for key, df in inputs_dict.items()
-            }
-            targets_train_fold = targets_train[train_idx]
-
-            inputs_val_fold = {
-                key: df.iloc[val_idx, :] for key, df in inputs_dict.items()
-            }
-
-            targets_val_fold = targets_train[val_idx]
-            tf.keras.backend.clear_session()
-            tf.random.set_seed(345)
-            _results = self.fit(
-                inputs_train_fold,
-                targets_train_fold,
-                embedding_vocabs,
-                validation_data=(inputs_val_fold, targets_val_fold),
-                class_weight=class_weight,
+            fold_str = f"Fold #{n_fold + 1}"
+            logger.info(f"{fold_str:.^50}")
+            train_dataset = ProjectDataset(
+                inputs_train,
+                targets_train,
+                idxs=train_idxs,
+                device=self.model_config.device,
             )
-            logger.info(f"Model trained on split #{idx + 1}")
-            results.append(_results)
+            logger.info(f"Training dataset with {len(train_idxs)} rows created")
+            val_dataset = ProjectDataset(
+                inputs_train,
+                targets_train,
+                idxs=val_idxs,
+                device=self.model_config.device,
+            )
+            logger.info(f"Validation dataset with {len(val_idxs)} rows created")
+            train_loader = DataLoader(
+                train_dataset, batch_size=self.model_config.batch_size
+            )
+            val_loader = DataLoader(
+                val_dataset, batch_size=self.model_config.batch_size
+            )
+
+            self.create_torch_model(
+                embedding_vocabs, user_features_dim, sku_features_dim
+            )
+            with tqdm(range(self.model_config.max_epochs), mininterval=2) as epoch_bar:
+                for n_epoch in epoch_bar:
+                    epoch_mean_train_loss = self.train_one_epoch(train_loader)
+                    results["train_loss"].iloc[n_epoch, n_fold] = epoch_mean_train_loss
+                    epoch_mean_val_loss = self.validate_one_epoch(val_loader)
+                    results["val_loss"].iloc[n_epoch, n_fold] = epoch_mean_val_loss
+                    epoch_bar.set_description(
+                        f"training loss: {epoch_mean_train_loss:.2f} - validation loss: {epoch_mean_val_loss:.2f}"
+                    )
         return results
 
     def evaluate_model(self, df_test):
@@ -632,12 +393,11 @@ class Trainer:
 
 if __name__ == "__main__":
     model_config = RegressorConfig(
-        fit_verbose=0,
         learning_rate=0.0001,
-        epochs=1_000,
-        embedding_dim=8,
-        batch_size=1024,
-        embedding_func="subtract",
+        max_epochs=100,
+        embedding_dim=5,
+        batch_size=512,
+        # embedding_func="subtract",
     )
     trainer = Trainer(model_config)
     # load data
@@ -647,22 +407,9 @@ if __name__ == "__main__":
     trainer.fit_pipelines(df_train)
     inputs_train, embedding_vocabs = trainer.get_inputs_dict(df_train)
     targets_train = trainer.get_targets(df_train)
-    # dummy regressor
-    # trainer.create_dummy_regressor(targets_train)
-    # trainer.compile_model()
-    # trainer.create_call_backs()
-    results = trainer.fit(
+    results = trainer.fit_with_cross_validation(
         inputs_train,
         targets_train,
         embedding_vocabs,
-        class_weight=None,
+        n_folds=5,
     )
-
-    # results = trainer.fit_with_cross_validation(
-    #     inputs_train,
-    #     targets_train,
-    #     embedding_vocabs,
-    #     n_splits=3,
-    #     class_weight=None,
-    # )
-    trainer.evaluate_model(df_test)

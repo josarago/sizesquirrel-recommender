@@ -4,19 +4,30 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from config import RegressorConfig, ClassifierConfig
 from pipelines import TARGET_CATEGORIES, EMBEDDING_COLUMNS
 
 
 class RatingScaler(nn.Module):
     def __init__(self):
-        super().__init__()  # init the base class
+        super().__init__()
 
     def forward(self, input):
         """
         Forward pass of the function.
         """
         return (len(TARGET_CATEGORIES) - 1) * nn.Sigmoid()(input) + 1
+
+
+def get_history_df(n_folds, n_epochs):
+    nan_array = np.empty((n_epochs, n_folds))
+    nan_array[:] = np.nan
+    df = pd.DataFrame(
+        data=nan_array,
+        index=range(n_epochs),
+        columns=[f"fold_{n+1}" for n in range(n_folds)],
+    )
+    df.index.rename("epoch", inplace=True)
+    return df
 
 
 class RatingPredictor(nn.Module):
