@@ -1,9 +1,14 @@
-import torch
-from torch import nn
+from typing import Dict, List
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import torch
+from torch import nn
+import pytorch_lightning as pl
+
+from config import RegressorConfig
 from pipelines import TARGET_CATEGORIES, EMBEDDING_COLUMNS
 
 
@@ -30,7 +35,7 @@ def get_history_df(n_folds, n_epochs):
     return df
 
 
-class RatingPredictor(nn.Module):
+class RatingRegressor(nn.Module):
     def __init__(
         self,
         embedding_dim,
@@ -147,3 +152,42 @@ class RatingPredictor(nn.Module):
         with_biases = torch.sum(torch.stack([x_bias_user, x_bias_sku, combined]), dim=0)
         out = self.rating_scaler(with_biases)
         return out
+
+
+class LitRatingRegressor(pl.LightningModule):
+    def __init__(
+        self,
+        model_config: RegressorConfig,
+        embedding_vocabs,
+        user_features_dim,
+        sku_features_dim,
+    ):
+        super().__init__()
+        self.model_config = model_config
+        self.model = RatingRegressor(
+            self.model_config.embedding_dim,
+            embedding_vocabs,
+            user_features_dim,
+            sku_features_dim,
+        ).to(self.model_config.device)
+        self.loss_fn = model_config.loss_fn
+        self.learning_rate = model_config.learning_rate
+
+    def training_step(self, batch: List[torch.Tensor], batch_idx: int) -> torch.Tensor:
+        x, y = batch
+        output = self.model(x)
+        loss = self.model_config.loss_fn(output, y)
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, val_batch, batch_idx):
+        x, y = val_batch
+        output = self.model(x)
+        loss = self.model_config.loss_fn(output, y)
+        self.log("val_loss", loss)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(
+            self.parameters(), lr=self.model_config.learning_rate
+        )
+        return optimizer

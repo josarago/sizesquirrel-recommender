@@ -34,7 +34,7 @@ from config import (
     US_EURO_SIZE_THRESHOLD,
     RegressorConfig,
 )
-from torch_models import RatingPredictor, get_history_df
+from torch_models import RatingRegressor, get_history_df
 
 from datasets import SizeSquirrelRecommenderDataset as ProjectDataset
 
@@ -213,7 +213,7 @@ class Trainer:
 
     def create_torch_model(self, embedding_vocabs, user_features_dim, sku_features_dim):
 
-        self.model = RatingPredictor(
+        self.model = RatingRegressor(
             self.model_config.embedding_dim,
             embedding_vocabs,
             user_features_dim,
