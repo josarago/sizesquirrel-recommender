@@ -155,7 +155,7 @@ class Trainer:
     def get_embedding_inputs(self, df):
         embedding_df = self.embedding_pipe.transform(df)
         embedding_inputs = {
-            col: torch.tensor(embedding_df[col].values).view(-1, 1)
+            col: torch.tensor(embedding_df[col].values).unsqueeze(1)
             for col in self.embedding_columns
         }
         embedding_vocabs = {
