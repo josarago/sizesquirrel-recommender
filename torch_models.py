@@ -51,8 +51,8 @@ class RatingRegressor(nn.Module):
         self.sku_features_dim = sku_features_dim
         self.combine_func = combine_func
         # initialize
-        self.embeddings = dict()
-        self.biases = dict()
+        self.embeddings = nn.ModuleDict()
+        self.biases = nn.ModuleDict()
         # embedding inputs
         for name, vocabulary in vocabularies.items():
             vocab_size = len(vocabulary)
