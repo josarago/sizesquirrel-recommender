@@ -55,4 +55,4 @@ The data we have present a few difficulties:
 
 ## Improvements
 - **Allow gender to be part of recommendation**: shoe gender is both about aspect and foot shape. Some users who identify as a given gender might find, for some specific item, a better fit from a shoe with another gender than theirs.
--
+- ...
